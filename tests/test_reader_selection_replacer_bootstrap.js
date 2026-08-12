@@ -338,4 +338,46 @@ assert.strictEqual(
   assert.strictEqual(measured.fits, true);
 }
 
+{
+  const makeLine = () => ({
+    style: {},
+    textContent: "",
+    get scrollWidth() {
+      return String(this.textContent || "").length
+        * Number.parseFloat(this.style.fontSize || "0") * 0.8;
+    }
+  });
+  const node = {
+    isConnected: true,
+    style: {},
+    ownerDocument: { createElement: () => makeLine() },
+    append(child) { this.child = child; },
+    textContent: ""
+  };
+  const fitted = overlay.fitTitleText({ node,
+    containerWidth: 200, containerHeight: 14,
+    translatedText: "单行标题", sourceRects: [[0, 0, 200, 14]] });
+  assert.strictEqual(fitted.rendered, true);
+  assert.strictEqual(fitted.layoutMode, "title-single");
+  assert.strictEqual(fitted.lines.length, 1);
+  assert.strictEqual(fitted.lineHeight, 1.05);
+  assert.ok(fitted.fontSize <= 14 / 1.05 + 0.01);
+  assert.strictEqual(fitted.verticalOverflow, false);
+}
+
+{
+  const abstractSuccess = overlay.translationDecoration("abstract", "success");
+  assert.strictEqual(abstractSuccess.border, "none");
+  assert.strictEqual(abstractSuccess.showBadge, false);
+  assert.strictEqual(abstractSuccess.badgeText, "");
+  const abstractFailure = overlay.translationDecoration("abstract", "failure");
+  assert.strictEqual(abstractFailure.border, "1px dashed #f97316");
+  assert.strictEqual(abstractFailure.showBadge, true);
+  assert.strictEqual(abstractFailure.badgeText, "摘要状态");
+  const titleSuccess = overlay.translationDecoration("title", "success");
+  assert.strictEqual(titleSuccess.border, "2px solid #2563eb");
+  assert.strictEqual(titleSuccess.showBadge, true);
+  assert.strictEqual(titleSuccess.badgeText, "标题译文");
+}
+
 console.log("selection replacer bootstrap tests passed");

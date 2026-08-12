@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.6";
+const PLUGIN_VERSION = "0.4.7";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
@@ -1934,24 +1934,26 @@ var SelectionReplacerOverlay = {
 
   measureTextLayout({ node, containerWidth, containerHeight, fontSize, lineHeight,
     mode = "block", lineNodes = [] }) {
+    const titleMode = mode === "title";
     const paddingX = 8;
-    const paddingY = 6;
+    const paddingY = titleMode ? 0 : 6;
     const availableWidth = Math.max(1, containerWidth - paddingX);
     const availableHeight = Math.max(1, containerHeight - paddingY);
     node.style.fontSize = `${fontSize}px`;
     node.style.lineHeight = String(lineHeight);
     let contentWidth = 0;
     let contentHeight = 0;
-    if (mode === "title") {
+    if (titleMode) {
       for (const line of lineNodes) {
         line.style.fontSize = `${fontSize}px`;
         line.style.lineHeight = String(lineHeight);
       }
       contentWidth = Math.max(0, ...lineNodes.map(line =>
-        Number(line.scrollWidth || line.getBoundingClientRect?.().width || 0)));
-      contentHeight = lineNodes.reduce((sum, line) => sum
-        + Number(line.scrollHeight || line.getBoundingClientRect?.().height
-          || fontSize * lineHeight), 0);
+        Number(line.scrollWidth || line.getBoundingClientRect?.()?.width || 0)));
+      // Title lines are measured as independent nowrap nodes.  Do not use the
+      // flex container's scrollHeight: it includes the parent box and can make
+      // an otherwise valid single line look vertically clipped.
+      contentHeight = lineNodes.length * fontSize * lineHeight;
     }
     else {
       contentWidth = Math.max(0, Number(node.scrollWidth || 0) - paddingX);
@@ -1984,12 +1986,19 @@ var SelectionReplacerOverlay = {
     const layout = this.titleBreakParts(translatedText);
     node.textContent = "";
     const doc = node.ownerDocument;
+    this.style(node, {
+      position: "absolute", top: "0", left: "0", right: "0", bottom: "0",
+      width: "100%", height: "100%", boxSizing: "border-box", padding: "0 4px",
+      margin: "0", overflow: "hidden", whiteSpace: "normal", display: "flex",
+      flexDirection: "column", alignItems: "center", justifyContent: "center",
+      textAlign: "center"
+    });
     const lineNodes = layout.lines.map(text => {
       const line = doc.createElement("div");
       line.className = "reader-selection-replacer-title-line";
       line.textContent = text;
       this.style(line, { display: "block", width: "max-content", maxWidth: "none",
-        padding: "0", margin: "0 auto", whiteSpace: "nowrap", overflow: "visible",
+        padding: "0", margin: "0", whiteSpace: "nowrap", overflow: "visible",
         overflowWrap: "normal", wordBreak: "normal", boxSizing: "content-box" });
       node.append(line);
       return line;
@@ -1997,10 +2006,12 @@ var SelectionReplacerOverlay = {
     const heights = (sourceRects || []).map(rect => Math.max(1, rect[3] - rect[1]))
       .sort((left, right) => left - right);
     const medianHeight = heights[Math.floor(heights.length / 2)] || containerHeight;
-    const minimum = Math.max(10, Math.min(40, medianHeight * 0.72));
-    const maximum = Math.max(minimum, Math.min(40, medianHeight * 1.35));
+    const lineCount = Math.max(1, layout.lines.length);
     const lineMin = 1.05;
-    const lineMax = 1.22;
+    const heightLimitedMaximum = Math.max(0.5, containerHeight / (lineCount * lineMin));
+    const minimum = Math.max(0.5, Math.min(10, heightLimitedMaximum));
+    const maximum = Math.max(minimum, Math.min(40, medianHeight * 1.35,
+      heightLimitedMaximum));
     const measure = (fontSize, lineHeight) => this.measureTextLayout({ node,
       containerWidth, containerHeight, fontSize, lineHeight, mode: "title", lineNodes });
     if (!(node?.isConnected !== false) || !(containerWidth > 1) || !(containerHeight > 1)) {
@@ -2024,11 +2035,13 @@ var SelectionReplacerOverlay = {
       else high = middle;
     }
     let lineLow = lineMin;
-    let lineHigh = lineMax;
-    for (let iteration = 0; iteration < 8; iteration++) {
-      const middle = (lineLow + lineHigh) / 2;
-      if (measure(low, middle).fits) lineLow = middle;
-      else lineHigh = middle;
+    if (lineCount > 1) {
+      let lineHigh = 1.22;
+      for (let iteration = 0; iteration < 8; iteration++) {
+        const middle = (lineLow + lineHigh) / 2;
+        if (measure(low, middle).fits) lineLow = middle;
+        else lineHigh = middle;
+      }
     }
     const finalMeasure = measure(low, lineLow);
     return { rendered: true,
@@ -2112,7 +2125,6 @@ var SelectionReplacerOverlay = {
     const width = Math.max(1, right - left);
     const height = Math.max(1, bottom - top);
     const accent = AUTO_TARGET_COLORS[target.kind] || PARAGRAPH_MARK_COLORS[targetIndex];
-    const label = AUTO_TARGET_LABELS[target.kind] || target.kind;
     const colors = this.pageColors(state, part.pageIndex);
     const root = doc.createElement("div");
     root.className = "reader-selection-replacer-test-auto-part merged-translation";
@@ -2124,7 +2136,7 @@ var SelectionReplacerOverlay = {
     this.style(root, {
       position: "absolute", boxSizing: "border-box", left: `${Math.max(0, left)}px`,
       top: `${Math.max(0, top)}px`, width: `${width}px`, height: `${height}px`,
-      overflow: "hidden", border: `2px solid ${accent}`, background: colors.background,
+      overflow: "hidden", border: "none", background: colors.background,
       pointerEvents: "none"
     });
     const textNode = doc.createElement("div");
@@ -2146,13 +2158,6 @@ var SelectionReplacerOverlay = {
       pointerEvents: "none"
     });
     root.append(textNode);
-    const badge = doc.createElement("span");
-    badge.className = "reader-selection-replacer-test-auto-badge";
-    badge.textContent = `${label}译文`;
-    this.style(badge, { position: "absolute", left: "0", top: "0", zIndex: "3",
-      padding: "0 3px", color: "#ffffff", background: accent,
-      font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none" });
-    root.append(badge);
     layer.append(root);
     let fitted;
     if (!translatedText) {
@@ -2163,18 +2168,52 @@ var SelectionReplacerOverlay = {
     else if (target.kind === "title") {
       fitted = this.fitTitleText({ node: textNode, containerWidth: width,
         containerHeight: height, sourceRects: part.sourceRects, translatedText });
-      if (!fitted.rendered) fitted = this.renderTranslationStatus(textNode, target.kind,
-        "标题无法排版", fitted.failureReason);
+      if (!fitted.rendered) {
+        const layoutFailure = fitted;
+        const status = this.renderTranslationStatus(textNode, target.kind,
+          "标题无法排版", layoutFailure.failureReason);
+        fitted = { ...status, ...layoutFailure, rendered: true,
+          layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+      }
     }
     else if (target.kind === "abstract") {
       fitted = this.fitAbstractText({ node: textNode, containerWidth: width,
         containerHeight: height, sourceRects: part.sourceRects, translatedText });
-      if (!fitted.rendered) fitted = this.renderTranslationStatus(textNode, target.kind,
-        "摘要无法排版", fitted.failureReason);
+      if (!fitted.rendered) {
+        const layoutFailure = fitted;
+        const status = this.renderTranslationStatus(textNode, target.kind,
+          "摘要无法排版", layoutFailure.failureReason);
+        fitted = { ...status, ...layoutFailure, rendered: true,
+          layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+      }
     }
     else fitted = this.renderTranslationStatus(textNode, target.kind,
       "译文无法排版", "unsupported-target-kind");
+    const displayStatus = translatedText && !String(fitted.layoutMode || "").endsWith("-status")
+      ? "success" : "failure";
+    const decoration = this.translationDecoration(target.kind, displayStatus);
+    root.style.border = decoration.border;
+    root.dataset.translationDisplayStatus = displayStatus;
+    if (decoration.showBadge) {
+      const badge = doc.createElement("span");
+      badge.className = "reader-selection-replacer-test-auto-badge";
+      badge.textContent = decoration.badgeText;
+      this.style(badge, { position: "absolute", left: "0", top: "0", zIndex: "3",
+        padding: "0 3px", color: "#ffffff", background: accent,
+        font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none" });
+      root.append(badge);
+    }
     return { ...fitted, node: root };
+  },
+
+  translationDecoration(kind, status) {
+    if (kind === "abstract" && status === "success") {
+      return { border: "none", showBadge: false, badgeText: "" };
+    }
+    if (kind === "abstract") {
+      return { border: "1px dashed #f97316", showBadge: true, badgeText: "摘要状态" };
+    }
+    return { border: "2px solid #2563eb", showBadge: true, badgeText: "标题译文" };
   },
 
   renderTranslationStatus(node, kind, message, failureReason) {
