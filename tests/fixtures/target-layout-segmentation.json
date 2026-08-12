@@ -1,0 +1,82 @@
+{
+  "schema": "reader-text-highlighter.segmentation.v1",
+  "source": "target PDF minimal regression excerpt",
+  "pageMetrics": [
+    { "pageIndex": 0, "width": 595.28, "height": 793.70 },
+    { "pageIndex": 1, "width": 595.28, "height": 793.70 }
+  ],
+  "raw": [
+    {
+      "sourceIndex": 0,
+      "text": "Recording of frequent structural damage to the hull of bulk carriers (some of it serious) motivates the need to optimize",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[318, 90, 570, 101], [318, 104, 570, 115], [318, 118, 570, 129]]
+      }
+    },
+    {
+      "sourceIndex": 1,
+      "text": "the concept of computer-based rational design through advanced analysis methods.",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[318, 134, 570, 145], [318, 148, 570, 159]]
+      }
+    },
+    {
+      "sourceIndex": 2,
+      "text": "The general objective of this paper is to optimize the midship section through structural modelling under combined bending stress",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[37, 730, 286, 741], [37, 744, 286, 755], [37, 758, 286, 780]]
+      }
+    },
+    {
+      "sourceIndex": 3,
+      "text": "with transverse-vertical bending and longitudinal torsion.",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[318, 690, 570, 701], [318, 704, 570, 715]]
+      }
+    },
+    {
+      "sourceIndex": 4,
+      "text": "It is important to highlight, from the beginning, the work's originality and contributions.",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[338, 742, 570, 753], [318, 756, 570, 767]]
+      }
+    },
+    {
+      "sourceIndex": 5,
+      "text": "a) Reformulation of the structural modeling of the hull.",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[318, 778, 570, 789]]
+      }
+    },
+    {
+      "sourceIndex": 6,
+      "text": "The analysis continues at the bottom of the first page without a completed sentence",
+      "position": {
+        "pageIndex": 0,
+        "rects": [[37, 760, 286, 771], [37, 774, 286, 793]]
+      }
+    },
+    {
+      "sourceIndex": 7,
+      "text": "with the next page continuing the same discussion.",
+      "position": {
+        "pageIndex": 1,
+        "rects": [[37, 32, 286, 43], [37, 46, 286, 57]]
+      }
+    },
+    {
+      "sourceIndex": 8,
+      "text": "This is a new paragraph after the page transition and it must remain separate.",
+      "position": {
+        "pageIndex": 1,
+        "rects": [[60, 100, 286, 111], [37, 114, 286, 125]]
+      }
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+zotero(1)(+0000000): Custom data directory E:\Kumiko\pythonProject\Zotero\tmp\zotero-0.6.1-smoke-data not found
+
+Crash Annotation GraphicsCriticalError: |[0][GFX1-]: RenderCompositorSWGL failed mapping default framebuffer, no dt (t=5.4031) [GFX1-]: RenderCompositorSWGL failed mapping default framebuffer, no dt

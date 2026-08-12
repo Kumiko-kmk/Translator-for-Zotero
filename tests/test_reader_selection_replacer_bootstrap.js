@@ -1,0 +1,341 @@
+"use strict";
+
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const bootstrapPath = path.resolve(
+  __dirname,
+  "..",
+  "zotero-reader-selection-replacer-test",
+  "bootstrap.js"
+);
+const bootstrap = fs.readFileSync(bootstrapPath, "utf8");
+const context = {
+  console,
+  setTimeout,
+  clearTimeout,
+  setInterval,
+  clearInterval,
+  Zotero: {
+    Promise: { delay: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) },
+    debug() {},
+    logError() {}
+  },
+  Components: {
+    utils: {
+      cloneInto(value) { return value; },
+      exportFunction(value) { return value; }
+    }
+  },
+  Services: { scriptloader: { loadSubScript() {} } },
+  APP_SHUTDOWN: "shutdown"
+};
+context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(bootstrap, context, { filename: bootstrapPath });
+
+const matcher = context.SelectionMatcher;
+const splitReplacement = context.splitReplacement;
+const replacerTest = context.SelectionReplacerTest;
+const locator = context.ReaderTargetLocator;
+const overlay = context.SelectionReplacerOverlay;
+
+function makeFixture(paragraphLineCounts) {
+  const chars = [];
+  const lineRects = [];
+  const rawParagraphs = [];
+  const paragraphTexts = [];
+  let offset = 0;
+  let lineIndex = 0;
+
+  for (let paragraphIndex = 0; paragraphIndex < paragraphLineCounts.length; paragraphIndex++) {
+    const sourceCharIDs = [];
+    const lines = [];
+    for (let localLine = 0; localLine < paragraphLineCounts[paragraphIndex]; localLine++) {
+      const lineText = "ABCD";
+      const top = lineIndex * 20;
+      const lineRect = [0, top, lineText.length * 10, top + 10];
+      lineRects.push(lineRect);
+      lines.push(lineText);
+      for (let charIndex = 0; charIndex < lineText.length; charIndex++) {
+        const id = `0:char:${offset}`;
+        sourceCharIDs.push(id);
+        chars.push({
+          id,
+          offset,
+          pageIndex: 0,
+          c: lineText[charIndex],
+          rect: [charIndex * 10, top, charIndex * 10 + 9, top + 10],
+          lineBreakAfter: charIndex === lineText.length - 1,
+          paragraphBreakAfter: localLine === paragraphLineCounts[paragraphIndex] - 1
+            && charIndex === lineText.length - 1,
+          ignorable: false
+        });
+        offset++;
+      }
+      lineIndex++;
+    }
+    const text = lines.join(" ");
+    paragraphTexts.push(text);
+    rawParagraphs.push({
+      sourceIndex: paragraphIndex,
+      sourceOrder: paragraphIndex,
+      text,
+      sourceCharIDs,
+      contentType: "body-paragraph"
+    });
+  }
+
+  const position = {
+    pageIndex: 0,
+    rects: lineRects,
+    fragments: [{ pageIndex: 0, rects: lineRects }]
+  };
+  return {
+    pages: [{ pageIndex: 0, chars }],
+    rawParagraphs,
+    position,
+    sourceText: paragraphTexts.join(" "),
+    lineRects,
+    chars
+  };
+}
+
+function positionForLines(fixture, lineIndexes) {
+  const rects = lineIndexes.map(index => fixture.lineRects[index]);
+  return { pageIndex: 0, rects, fragments: [{ pageIndex: 0, rects }] };
+}
+
+function makeCrossPageFixture() {
+  const pages = [];
+  const fragments = [];
+  const sourceCharIDs = [];
+  const paragraphLines = [];
+  let sourceText = [];
+  for (let pageIndex = 0; pageIndex < 2; pageIndex++) {
+    const chars = [];
+    const rects = [];
+    for (let localLine = 0; localLine < 2; localLine++) {
+      const text = "ABCD";
+      const top = localLine * 20;
+      const rect = [0, top, 40, top + 10];
+      rects.push(rect);
+      paragraphLines.push(text);
+      sourceText.push(text);
+      for (let charIndex = 0; charIndex < text.length; charIndex++) {
+        const offset = localLine * text.length + charIndex;
+        const id = `${pageIndex}:char:${offset}`;
+        sourceCharIDs.push(id);
+        chars.push({
+          id,
+          offset,
+          pageIndex,
+          c: text[charIndex],
+          rect: [charIndex * 10, top, charIndex * 10 + 9, top + 10],
+          lineBreakAfter: charIndex === text.length - 1,
+          paragraphBreakAfter: pageIndex === 1 && localLine === 1
+            && charIndex === text.length - 1,
+          ignorable: false
+        });
+      }
+    }
+    pages.push({ pageIndex, chars });
+    fragments.push({ pageIndex, rects });
+  }
+  return {
+    pages,
+    rawParagraphs: [{
+      sourceIndex: 0,
+      sourceOrder: 0,
+      text: paragraphLines.join(" "),
+      sourceCharIDs,
+      contentType: "body-paragraph"
+    }],
+    position: { pageIndex: 0, rects: fragments[0].rects, fragments },
+    sourceText: sourceText.join(" ")
+  };
+}
+
+{
+  const fixture = makeFixture([8]);
+  const match = matcher.analyze(fixture);
+  assert.strictEqual(match.diagnostics.rawRectCount, 8);
+  assert.strictEqual(match.diagnostics.paragraphCount, 1);
+  assert.strictEqual(match.diagnostics.fullParagraphCount, 1);
+  assert.strictEqual(match.diagnostics.partialParagraphCount, 0);
+  assert.strictEqual(match.paragraphs[0].matchType, "full");
+  assert.strictEqual(match.paragraphs[0].selectedRectCount, 8);
+  assert.strictEqual(match.paragraphs[0].selectedPosition.fragments[0].rects.length, 8);
+}
+
+{
+  const fixture = makeFixture([4, 3]);
+  const match = matcher.analyze(fixture);
+  assert.strictEqual(match.diagnostics.rawRectCount, 7);
+  assert.strictEqual(match.diagnostics.paragraphCount, 2);
+  assert.strictEqual(match.diagnostics.fullParagraphCount, 2);
+  assert.deepStrictEqual(Array.from(match.paragraphs, paragraph => paragraph.sourceIndex), [0, 1]);
+}
+
+{
+  const fixture = makeFixture([8]);
+  const selectedLines = [0, 1];
+  const match = matcher.analyze({
+    ...fixture,
+    position: positionForLines(fixture, selectedLines),
+    sourceText: selectedLines.map(() => "ABCD").join(" ")
+  });
+  assert.strictEqual(match.diagnostics.rawRectCount, 2);
+  assert.strictEqual(match.diagnostics.paragraphCount, 1);
+  assert.strictEqual(match.diagnostics.fullParagraphCount, 0);
+  assert.strictEqual(match.diagnostics.partialParagraphCount, 1);
+  assert.strictEqual(match.paragraphs[0].matchType, "partial");
+}
+
+{
+  const match = matcher.analyze(makeCrossPageFixture());
+  assert.strictEqual(match.diagnostics.paragraphCount, 1);
+  assert.strictEqual(match.paragraphs[0].selectedRectCount, 4);
+  assert.strictEqual(match.paragraphs[0].selectedPosition.fragments.length, 2);
+}
+
+{
+  const fixture = makeFixture([3]);
+  const omittedIDs = new Set(fixture.pages[0].chars.slice(4, 8).map(char => char.id));
+  const rawParagraphs = fixture.rawParagraphs.map(paragraph => ({
+    ...paragraph,
+    sourceCharIDs: paragraph.sourceCharIDs.filter(id => !omittedIDs.has(id))
+  }));
+  const match = matcher.analyze({ ...fixture, rawParagraphs });
+  const unclassified = match.paragraphs.filter(paragraph => paragraph.matchType === "unclassified");
+  assert.strictEqual(unclassified.length, 1);
+  assert.strictEqual(match.diagnostics.unclassifiedGroupCount, 1);
+  assert.strictEqual(match.selectedCharCount,
+    match.diagnostics.classifiedCharCount + match.diagnostics.unclassifiedCharCount);
+  const assignedIDs = match.paragraphs.flatMap(paragraph => paragraph.selectedCharIDs);
+  assert.strictEqual(new Set(assignedIDs).size, assignedIDs.length);
+  assert.strictEqual(new Set(assignedIDs).size, match.selectedCharCount);
+}
+
+{
+  const fixture = makeFixture([3]);
+  const target = locator.matchText({ kind: "title", text: "ABCD ABCD" }, fixture.pages);
+  assert.ok(target);
+  assert.strictEqual(target.confidence, "high");
+  assert.strictEqual(target.matchMethod, "metadata-segmented");
+  assert.strictEqual(target.position.fragments[0].rects.length, 2);
+}
+
+{
+  const parts = Array.from({ length: 8 }, (_, index) => ({
+    rect: [0, index * 20, 100, index * 20 + 10],
+    sourceCharCount: 4
+  }));
+  assert.deepStrictEqual(Array.from(splitReplacement("测试", parts)), [
+    "测试", "", "", "", "", "", "", ""
+  ]);
+}
+
+assert.match(
+  replacerTest.formatDiagnostics({
+    rawRectCount: 8,
+    paragraphCount: 1,
+    fullParagraphCount: 0,
+    partialParagraphCount: 1,
+    confidence: "high"
+  }),
+  /原始矩形：8.*命中段落：1.*部分段落：1.*识别置信度：高/u
+);
+
+assert.strictEqual(
+  replacerTest.formatAutoStatusV2({
+    targets: [{
+      kind: "title",
+      confidence: "high",
+      matchMethod: "metadata-segmented",
+      metadataCoverage: 1
+    }]
+  }),
+  "标题: high/metadata 100% | 摘要: unlocated"
+);
+
+{
+  const merged = overlay.mergeTargetParts([
+    { pageIndex: 0, rect: [10, 20, 100, 35] },
+    { pageIndex: 0, rect: [12, 40, 160, 55] },
+    { pageIndex: 1, rect: [5, 8, 80, 18] }
+  ]);
+  assert.deepStrictEqual(Array.from(merged, part => ({
+    pageIndex: part.pageIndex,
+    rect: Array.from(part.rect),
+    sourceRectCount: part.sourceRects.length
+  })), [
+    { pageIndex: 0, rect: [10, 20, 160, 55], sourceRectCount: 2 },
+    { pageIndex: 1, rect: [5, 8, 80, 18], sourceRectCount: 1 }
+  ]);
+}
+
+{
+  const merged = overlay.mergeTitleParts([
+    { pageIndex: 0, rect: [10, 20, 180, 35] },
+    { pageIndex: 0, rect: [12, 40, 140, 55] }
+  ]);
+  assert.deepStrictEqual(Array.from(merged[0].rect), [10, 20, 180, 55]);
+  assert.strictEqual(merged[0].sourceRects.length, 2);
+  assert.deepStrictEqual(Array.from(overlay.titleBreakParts("简短标题").lines), ["简短标题"]);
+  const dsBreak = overlay.titleBreakParts(
+    "钢渣部分替代粗骨料对纤维增强混凝土曲梁<br>在静载和冲击荷载下性能的影响");
+  assert.strictEqual(dsBreak.breakSource, "deepseek");
+  assert.strictEqual(dsBreak.lines.length, 2);
+  const unmarked = overlay.titleBreakParts("这是一个超过二十四个有效字符但没有换行标记的中文学术论文标题");
+  assert.strictEqual(unmarked.breakSource, "none");
+  assert.strictEqual(unmarked.lines.length, 1);
+}
+
+{
+  const node = {
+    isConnected: true,
+    style: {},
+    get scrollWidth() {
+      return Number.parseFloat(this.style.fontSize || "8") > 22 ? 220 : 180;
+    },
+    get scrollHeight() {
+      return Number.parseFloat(this.style.fontSize || "8")
+        * Number(this.style.lineHeight || 1) * 4;
+    }
+  };
+  const fitted = overlay.fitAbstractText({ node,
+    containerWidth: 200, containerHeight: 100, translatedText: "摘要译文连续文本",
+    sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27], [0, 30, 200, 42]] });
+  assert.strictEqual(fitted.rendered, true);
+  assert.strictEqual(fitted.layoutMode, "abstract-fit");
+  assert.ok(fitted.fontSize > 12 * 1.45);
+  assert.ok(fitted.lineHeight >= 1.1 && fitted.lineHeight <= 2.2);
+  assert.ok(fitted.verticalUsage > 0.9);
+  assert.strictEqual(node.style.display, "block");
+  assert.strictEqual(node.style.wordBreak, "normal");
+  assert.strictEqual(node.style.overflowWrap, "break-word");
+}
+
+{
+  const node = { isConnected: true, style: {}, scrollWidth: 400, scrollHeight: 400 };
+  const fitted = overlay.fitAbstractText({ node,
+    containerWidth: 150, containerHeight: 30, translatedText: "过长摘要译文",
+    sourceRects: [[0, 0, 150, 15]] });
+  assert.strictEqual(fitted.rendered, false);
+  assert.strictEqual(fitted.failureReason, "minimum-font-overflow");
+}
+
+{
+  const node = { isConnected: true, style: {}, scrollWidth: 400, scrollHeight: 400 };
+  const measured = overlay.measureTextLayout({ node,
+    containerWidth: 400, containerHeight: 500, fontSize: 10, lineHeight: 1.1,
+    mode: "block" });
+  assert.strictEqual(measured.availableWidth, 392);
+  assert.strictEqual(measured.availableHeight, 494);
+  assert.strictEqual(measured.fits, true);
+}
+
+console.log("selection replacer bootstrap tests passed");

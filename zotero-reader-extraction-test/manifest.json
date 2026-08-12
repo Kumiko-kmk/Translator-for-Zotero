@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Paper Assistant Reader Extraction Test",
+  "version": "0.10.2",
+  "description": "Extract main-section body paragraphs from Zotero getPageData characters.",
+  "author": "Kumiko",
+  "applications": {
+    "zotero": {
+      "id": "reader-text-extraction-test@local.kumiko",
+      "update_url": "https://reader-text-extraction-test.invalid/updates.json",
+      "strict_min_version": "9.0",
+      "strict_max_version": "9.*"
+    }
+  }
+}
