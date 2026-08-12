@@ -351,7 +351,8 @@ assert.strictEqual(
     isConnected: true,
     style: {},
     ownerDocument: { createElement: () => makeLine() },
-    append(child) { this.child = child; },
+    children: [],
+    append(child) { this.children.push(child); },
     textContent: ""
   };
   const fitted = overlay.fitTitleText({ node,
@@ -360,9 +361,76 @@ assert.strictEqual(
   assert.strictEqual(fitted.rendered, true);
   assert.strictEqual(fitted.layoutMode, "title-single");
   assert.strictEqual(fitted.lines.length, 1);
+  assert.strictEqual(fitted.breakSource, "short-title-forced-single");
   assert.strictEqual(fitted.lineHeight, 1.05);
   assert.ok(fitted.fontSize <= 14 / 1.05 + 0.01);
   assert.strictEqual(fitted.verticalOverflow, false);
+  assert.strictEqual(node.style.position, "absolute");
+  assert.strictEqual(node.style.inset, "0");
+  assert.strictEqual(node.style.width, "100%");
+  assert.strictEqual(node.style.height, "100%");
+  assert.strictEqual(node.style.justifyContent, "center");
+  assert.strictEqual(node.children.length, 1);
+  assert.strictEqual(node.children[0].style.whiteSpace, "nowrap");
+}
+
+{
+  const makeLine = () => ({
+    style: {},
+    textContent: "",
+    get scrollWidth() {
+      return String(this.textContent || "").length
+        * Number.parseFloat(this.style.fontSize || "0") * 0.8;
+    }
+  });
+  const node = {
+    isConnected: true,
+    style: {},
+    ownerDocument: { createElement: () => makeLine() },
+    children: [],
+    append(child) { this.children.push(child); },
+    textContent: ""
+  };
+  const fitted = overlay.fitTitleText({ node,
+    containerWidth: 200, containerHeight: 24,
+    translatedText: "短标题<br>测试", sourceRects: [[0, 0, 200, 24]] });
+  assert.strictEqual("短标题<br>测试".length < 16, true);
+  assert.strictEqual(fitted.rendered, true);
+  assert.strictEqual(fitted.layoutMode, "title-single");
+  assert.strictEqual(fitted.breakSource, "short-title-forced-single");
+  assert.deepStrictEqual(Array.from(fitted.lines), ["短标题测试"]);
+  assert.strictEqual(node.children.length, 1);
+  assert.strictEqual(node.children[0].textContent, "短标题测试");
+  assert.strictEqual(node.children[0].style.whiteSpace, "nowrap");
+}
+
+{
+  const makeLine = () => ({
+    style: {},
+    textContent: "",
+    get scrollWidth() {
+      return String(this.textContent || "").length
+        * Number.parseFloat(this.style.fontSize || "0") * 0.8;
+    }
+  });
+  const node = {
+    isConnected: true,
+    style: {},
+    ownerDocument: { createElement: () => makeLine() },
+    children: [],
+    append(child) { this.children.push(child); },
+    textContent: ""
+  };
+  const translatedText = "一二三四五六七八九十<br>十一";
+  assert.strictEqual(translatedText.length, 16);
+  const fitted = overlay.fitTitleText({ node,
+    containerWidth: 200, containerHeight: 30,
+    translatedText, sourceRects: [[0, 0, 200, 30]] });
+  assert.strictEqual(fitted.rendered, true);
+  assert.strictEqual(fitted.breakSource, "deepseek");
+  assert.strictEqual(fitted.layoutMode, "title-ds-two-line");
+  assert.deepStrictEqual(Array.from(fitted.lines), ["一二三四五六七八九十", "十一"]);
+  assert.strictEqual(node.children.length, 2);
 }
 
 {
@@ -375,9 +443,13 @@ assert.strictEqual(
   assert.strictEqual(abstractFailure.showBadge, true);
   assert.strictEqual(abstractFailure.badgeText, "摘要状态");
   const titleSuccess = overlay.translationDecoration("title", "success");
-  assert.strictEqual(titleSuccess.border, "2px solid #2563eb");
-  assert.strictEqual(titleSuccess.showBadge, true);
-  assert.strictEqual(titleSuccess.badgeText, "标题译文");
+  assert.strictEqual(titleSuccess.border, "none");
+  assert.strictEqual(titleSuccess.showBadge, false);
+  assert.strictEqual(titleSuccess.badgeText, "");
+  const titleFailure = overlay.translationDecoration("title", "failure");
+  assert.strictEqual(titleFailure.border, "none");
+  assert.strictEqual(titleFailure.showBadge, false);
+  assert.strictEqual(titleFailure.badgeText, "");
 }
 
 console.log("selection replacer bootstrap tests passed");

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Paper Assistant Reader Selection Replacer Test",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Automatically locate and translate PDF title and abstract, with reusable selection segments.",
   "author": "Kumiko",
   "applications": {

@@ -1,4 +1,4 @@
-# Reader Selection Replacer Test 0.4.7
+# Reader Selection Replacer Test 0.4.8
 
 这是一个独立的 Zotero 9.x PDF Reader 测试插件，用于验证：
 
@@ -27,7 +27,7 @@
 ## 使用
 
 1. 运行 `tools/build_reader_selection_replacer_test_xpi.ps1`。
-2. 安装 `dist/reader-selection-replacer-test-0.4.7.xpi`。
+2. 安装 `dist/reader-selection-replacer-test-0.4.8.xpi`。
 3. 重启 Zotero 并打开带文字层、父条目标题和摘要的 PDF。
 4. 使用 Reader 工具栏按钮可重新执行自动标记。
 5. 选择 PDF 文本后，可在选区弹窗中执行测试替换。

@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.7";
+const PLUGIN_VERSION = "0.4.8";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
@@ -1983,11 +1983,16 @@ var SelectionReplacerOverlay = {
   },
 
   fitTitleText({ node, containerWidth, containerHeight, sourceRects, translatedText }) {
-    const layout = this.titleBreakParts(translatedText);
+    const rawTitle = String(translatedText || "");
+    const shortTitle = rawTitle.length < 16;
+    const layout = shortTitle
+      ? { lines: [rawTitle.replace(/<\s*br\s*\/?>/giu, "")],
+        breakSource: "short-title-forced-single" }
+      : this.titleBreakParts(rawTitle);
     node.textContent = "";
     const doc = node.ownerDocument;
     this.style(node, {
-      position: "absolute", top: "0", left: "0", right: "0", bottom: "0",
+      position: "absolute", inset: "0",
       width: "100%", height: "100%", boxSizing: "border-box", padding: "0 4px",
       margin: "0", overflow: "hidden", whiteSpace: "normal", display: "flex",
       flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -2207,6 +2212,9 @@ var SelectionReplacerOverlay = {
   },
 
   translationDecoration(kind, status) {
+    if (kind === "title") {
+      return { border: "none", showBadge: false, badgeText: "" };
+    }
     if (kind === "abstract" && status === "success") {
       return { border: "none", showBadge: false, badgeText: "" };
     }
