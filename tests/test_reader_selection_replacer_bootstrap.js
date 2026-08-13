@@ -279,6 +279,61 @@ assert.strictEqual(
 }
 
 {
+  const parts = [
+    { pageIndex: 0, rect: [20, 20, 180, 30], sourceCharCount: 40 },
+    { pageIndex: 0, rect: [20, 34, 175, 44], sourceCharCount: 38 },
+    { pageIndex: 0, rect: [320, 20, 480, 30], sourceCharCount: 40 },
+    { pageIndex: 0, rect: [320, 34, 475, 44], sourceCharCount: 38 }
+  ];
+  const merged = overlay.mergeSelectionParts(parts);
+  assert.strictEqual(merged.length, 2);
+  assert.deepStrictEqual(Array.from(merged, part => Array.from(part.rect)), [
+    [20, 20, 180, 44], [320, 20, 480, 44]
+  ]);
+  assert.deepStrictEqual(Array.from(merged, part => part.sourceRects.length), [2, 2]);
+  assert.strictEqual(merged.every(part => part.rect[2] - part.rect[0] < 200), true);
+
+  const translated = "左栏译文。右栏译文，包含更多内容。";
+  const chunks = overlay.splitSelectionTranslation(translated, merged);
+  assert.strictEqual(chunks.join(""), translated);
+  assert.strictEqual(chunks.length, 2);
+  assert.ok(chunks[0].length > 0 && chunks[1].length > 0);
+}
+
+{
+  const parts = [
+    { pageIndex: 0, rect: [20, 20, 180, 30], sourceCharCount: 20 },
+    { pageIndex: 0, rect: [20, 34, 175, 44], sourceCharCount: 20 },
+    { pageIndex: 0, rect: [320, 20, 480, 30], sourceCharCount: 20 },
+    { pageIndex: 0, rect: [320, 34, 475, 44], sourceCharCount: 20 },
+    { pageIndex: 0, rect: [20, 50, 480, 60], sourceCharCount: 60 }
+  ];
+  const merged = overlay.mergeSelectionParts(parts);
+  assert.strictEqual(merged.length, 3);
+  assert.deepStrictEqual(Array.from(merged, part => Array.from(part.rect)), [
+    [20, 20, 180, 44], [320, 20, 480, 44], [20, 50, 480, 60]
+  ]);
+}
+
+{
+  const node = {
+    isConnected: true,
+    style: {},
+    scrollWidth: 180,
+    scrollHeight: 32
+  };
+  const fitted = overlay.fitSelectionText({ node,
+    containerWidth: 200, containerHeight: 50,
+    translatedText: "选区段落译文自动换行",
+    sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27]] });
+  assert.strictEqual(fitted.rendered, true);
+  assert.strictEqual(fitted.layoutMode, "selection-fit");
+  assert.strictEqual(node.style.textAlign, "left");
+  assert.strictEqual(node.style.whiteSpace, "pre-wrap");
+  assert.strictEqual(node.style.overflowWrap, "break-word");
+}
+
+{
   const merged = overlay.mergeTitleParts([
     { pageIndex: 0, rect: [10, 20, 180, 35] },
     { pageIndex: 0, rect: [12, 40, 140, 55] }

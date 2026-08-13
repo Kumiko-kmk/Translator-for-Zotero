@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.9";
+const PLUGIN_VERSION = "0.4.10";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
@@ -1913,14 +1913,175 @@ var SelectionReplacerOverlay = {
           }
         }
       }
-      const merged = this.mergeTargetParts(parts);
+      const merged = this.mergeSelectionParts(parts);
       if (!merged.length) return;
+      const translatedText = ["cached", "translated"].includes(translation?.status)
+        ? String(translation.translatedText || "") : "";
+      const chunks = translatedText
+        ? this.splitSelectionTranslation(translatedText, merged)
+        : merged.map(() => "");
       const results = merged.map((part, partIndex) => this.renderTranslatedSelectionTarget(
         state, part, paragraph, segment, paragraphIndex, partIndex, displayIndex,
-        translation));
+        translation, chunks[partIndex] || ""));
       state.selectionLayoutResults ||= new Map();
       if (segment) state.selectionLayoutResults.set(segment.id, results);
     });
+  },
+
+  clusterSelectionSequence(parts, pageIndex, columnIndex = null) {
+    const ordered = [...(parts || [])].sort((left, right) =>
+      left.rect[1] - right.rect[1] || left.rect[0] - right.rect[0]
+      || Number(left.sourceIndex || 0) - Number(right.sourceIndex || 0));
+    if (!ordered.length) return [];
+    const heights = ordered.map(part => Math.max(1, part.rect[3] - part.rect[1]))
+      .sort((left, right) => left - right);
+    const medianHeight = heights[Math.floor(heights.length / 2)] || 12;
+    const groups = [];
+    for (const part of ordered) {
+      const rect = part.rect;
+      const width = Math.max(1, rect[2] - rect[0]);
+      const previous = groups.at(-1);
+      const overlap = previous
+        ? Math.max(0, Math.min(previous.right, rect[2]) - Math.max(previous.left, rect[0])) : 0;
+      const overlapRatio = previous
+        ? overlap / Math.max(1, Math.min(previous.width, width)) : 0;
+      const verticalGap = previous ? rect[1] - previous.bottom : 0;
+      const contiguous = previous && overlapRatio >= 0.42
+        && verticalGap <= medianHeight * 2.2 && verticalGap >= -medianHeight;
+      let group = previous;
+      if (!contiguous) {
+        group = {
+          pageIndex,
+          columnIndex,
+          parts: [],
+          sourceRects: [],
+          sourceCharCount: 0,
+          left: rect[0], top: rect[1], right: rect[2], bottom: rect[3], width
+        };
+        groups.push(group);
+      }
+      group.parts.push(part);
+      group.sourceRects.push(rect);
+      group.sourceCharCount += Math.max(0, Number(part.sourceCharCount || 0));
+      group.left = Math.min(group.left, rect[0]);
+      group.top = Math.min(group.top, rect[1]);
+      group.right = Math.max(group.right, rect[2]);
+      group.bottom = Math.max(group.bottom, rect[3]);
+      group.width = group.right - group.left;
+    }
+    return groups.map(group => ({
+      pageIndex: group.pageIndex,
+      columnIndex: group.columnIndex,
+      rect: [group.left, group.top, group.right, group.bottom],
+      sourceRects: group.sourceRects,
+      sourceCharCount: group.sourceCharCount,
+      sourceParts: group.parts,
+      sourceIndex: Math.min(...group.parts.map(part => Number(part.sourceIndex ?? 0)))
+    }));
+  },
+
+  selectionColumnBoundary(parts) {
+    const ordered = (parts || []).filter(part => part?.rect);
+    if (ordered.length < 4) return null;
+    const heights = ordered.map(part => Math.max(1, part.rect[3] - part.rect[1]))
+      .sort((left, right) => left - right);
+    const medianHeight = heights[Math.floor(heights.length / 2)] || 12;
+    const widths = ordered.map(part => Math.max(1, part.rect[2] - part.rect[0]))
+      .sort((left, right) => left - right);
+    const medianWidth = widths[Math.floor(widths.length / 2)] || medianHeight * 10;
+    const candidates = ordered
+      .filter(part => part.rect[2] - part.rect[0] <= medianWidth * 1.8)
+      .sort((left, right) => ((left.rect[0] + left.rect[2]) / 2)
+        - ((right.rect[0] + right.rect[2]) / 2));
+    if (candidates.length < 4) return null;
+    let best = null;
+    for (let index = 1; index < candidates.length; index++) {
+      const left = candidates[index - 1];
+      const right = candidates[index];
+      const gap = right.rect[0] - left.rect[2];
+      if (gap < medianHeight * 1.5) continue;
+      const leftParts = candidates.slice(0, index);
+      const rightParts = candidates.slice(index);
+      if (leftParts.length < 2 || rightParts.length < 2) continue;
+      const overlapTop = Math.max(Math.min(...leftParts.map(part => part.rect[1])),
+        Math.min(...rightParts.map(part => part.rect[1])));
+      const overlapBottom = Math.min(Math.max(...leftParts.map(part => part.rect[3])),
+        Math.max(...rightParts.map(part => part.rect[3])));
+      if (overlapBottom <= overlapTop) continue;
+      if (!best || gap > best.gap) {
+        best = { boundary: (left.rect[2] + right.rect[0]) / 2, gap };
+      }
+    }
+    return best?.boundary ?? null;
+  },
+
+  mergeSelectionParts(parts) {
+    const byPage = new Map();
+    for (const [sourceIndex, part] of (parts || []).entries()) {
+      if (!part?.rect) continue;
+      if (!byPage.has(part.pageIndex)) byPage.set(part.pageIndex, []);
+      byPage.get(part.pageIndex).push({ ...part, sourceIndex });
+    }
+    const merged = [];
+    for (const [pageIndex, pageParts] of [...byPage.entries()]
+      .sort((left, right) => left[0] - right[0])) {
+      const boundary = this.selectionColumnBoundary(pageParts);
+      if (boundary === null) {
+        merged.push(...this.clusterSelectionSequence(pageParts, pageIndex));
+        continue;
+      }
+      const columns = [[], [], []];
+      for (const part of pageParts) {
+        const crossesGutter = part.rect[0] < boundary && part.rect[2] > boundary;
+        const columnIndex = crossesGutter ? 2 : part.rect[2] <= boundary ? 0 : 1;
+        columns[columnIndex].push(part);
+      }
+      // Keep source order inside a column, but emit left and right columns as
+      // separate flows so a two-column paragraph cannot become one page-wide box.
+      merged.push(...this.clusterSelectionSequence(columns[0], pageIndex, 0));
+      merged.push(...this.clusterSelectionSequence(columns[1], pageIndex, 1));
+      merged.push(...this.clusterSelectionSequence(columns[2], pageIndex, -1));
+    }
+    return merged.sort((left, right) => left.pageIndex - right.pageIndex
+      || left.sourceIndex - right.sourceIndex
+      || left.rect[1] - right.rect[1]
+      || Number(left.columnIndex ?? 0) - Number(right.columnIndex ?? 0));
+  },
+
+  splitSelectionTranslation(text, parts) {
+    const chars = [...String(text || "")];
+    if (!parts.length) return [];
+    if (!chars.length) return parts.map(() => "");
+    if (parts.length === 1) return [chars.join("")];
+    const weights = parts.map(part => Math.max(1,
+      Number(part.sourceCharCount || 0)
+        || (part.sourceRects || []).length));
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    const chunks = [];
+    let offset = 0;
+    for (let index = 0; index < parts.length; index++) {
+      if (index === parts.length - 1) {
+        chunks.push(chars.slice(offset).join(""));
+        break;
+      }
+      const cumulative = weights.slice(0, index + 1)
+        .reduce((sum, value) => sum + value, 0);
+      const target = Math.max(offset + 1, Math.min(chars.length - 1,
+        Math.round(chars.length * cumulative / totalWeight)));
+      const from = Math.max(offset + 1, target - 24);
+      const to = Math.min(chars.length - 1, target + 24);
+      let splitAt = target;
+      for (let cursor = from; cursor < chars.length - 1 && cursor <= to; cursor++) {
+        if (/[。！？；，.!?;,:]/u.test(chars[cursor])
+          && Math.abs(cursor - target) < Math.abs(splitAt - target)) {
+          splitAt = cursor + 1;
+        }
+      }
+      chunks.push(chars.slice(offset, splitAt).join(""));
+      offset = splitAt;
+    }
+    while (chunks.length < parts.length) chunks.push("");
+    return chunks;
   },
 
   mergeTargetParts(parts) {
@@ -2159,6 +2320,66 @@ var SelectionReplacerOverlay = {
     };
   },
 
+  fitSelectionText({ node, containerWidth, containerHeight, sourceRects, translatedText }) {
+    const heights = (sourceRects || []).map(rect => Math.max(1, rect[3] - rect[1]))
+      .sort((left, right) => left - right);
+    const medianHeight = heights[Math.floor(heights.length / 2)] || 12;
+    const minimum = Math.max(5, Math.min(14, medianHeight * 0.42));
+    const maximum = Math.max(minimum, Math.min(28, medianHeight * 1.08));
+    const availableHeight = Math.max(1, containerHeight - 6);
+    node.textContent = String(translatedText || "");
+    this.style(node, {
+      position: "absolute", top: "0", left: "0", width: "100%", height: "100%",
+      boxSizing: "border-box", padding: "3px 4px", margin: "0", overflow: "hidden",
+      whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: "normal",
+      letterSpacing: "normal", display: "block", textAlign: "left"
+    });
+    const measure = (fontSize, lineHeight) => this.measureTextLayout({
+      node, containerWidth, containerHeight, fontSize, lineHeight, mode: "block"
+    });
+    const failure = (reason, fontSize = 0, lineHeight = 0) => ({
+      rendered: false, layoutMode: "diagnostic", fontSize, lineHeight,
+      renderedLineCount: 0, verticalUsage: 0, sourceRectCount: heights.length,
+      mergedRectCount: 1, failureReason: reason
+    });
+    if (!(node?.isConnected !== false) || !(containerWidth > 1) || !(containerHeight > 1)) {
+      return failure("container-unavailable");
+    }
+    const minimumMeasure = measure(minimum, 1.10);
+    if (!minimumMeasure.fits) {
+      return { ...failure("minimum-font-overflow", minimum, 1.10), ...minimumMeasure };
+    }
+    let sizeLow = minimum;
+    let sizeHigh = maximum;
+    for (let iteration = 0; iteration < 10; iteration++) {
+      const middle = (sizeLow + sizeHigh) / 2;
+      if (measure(middle, 1.10).fits) sizeLow = middle;
+      else sizeHigh = middle;
+    }
+    const fontSize = sizeLow;
+    const compact = measure(fontSize, 1.10);
+    const renderedLineCount = this.visualLineCount(node, fontSize, 1.10);
+    const lineMaximum = renderedLineCount <= 1 ? 1.10
+      : renderedLineCount === 2 ? 1.55 : 1.90;
+    let lineLow = 1.10;
+    let lineHigh = lineMaximum;
+    for (let iteration = 0; iteration < 9; iteration++) {
+      const middle = (lineLow + lineHigh) / 2;
+      if (measure(fontSize, middle).fits) lineLow = middle;
+      else lineHigh = middle;
+    }
+    const finalMeasure = measure(fontSize, lineLow);
+    const visualLineCount = this.visualLineCount(node, fontSize, lineLow);
+    const verticalUsage = Math.min(1, finalMeasure.contentHeight / availableHeight);
+    return {
+      rendered: true, layoutMode: "selection-fit",
+      fontSize: Number(fontSize.toFixed(2)), lineHeight: Number(lineLow.toFixed(3)),
+      visualLineCount, renderedLineCount,
+      verticalUsage: Number(verticalUsage.toFixed(3)), ...compact, ...finalMeasure,
+      sourceRectCount: heights.length, mergedRectCount: 1, failureReason: ""
+    };
+  },
+
   renderTranslatedTarget(state, part, target, targetIndex, partIndex, translatedText,
     translation = null) {
     const layer = this.ensureLayer(state, part.pageIndex);
@@ -2252,7 +2473,7 @@ var SelectionReplacerOverlay = {
   },
 
   renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
-    partIndex, displayIndex, translation = null) {
+    partIndex, displayIndex, translation = null, translatedChunk = "") {
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2266,8 +2487,8 @@ var SelectionReplacerOverlay = {
       : PARAGRAPH_MARK_COLORS[paragraphIndex % PARAGRAPH_MARK_COLORS.length];
     const label = `${unclassified ? "U" : "P"}${displayIndex + 1}`;
     const colors = this.pageColors(state, part.pageIndex);
-    const translatedText = ["cached", "translated"].includes(translation?.status)
-      ? String(translation.translatedText || "") : "";
+    const translationSucceeded = ["cached", "translated"].includes(translation?.status);
+    const translatedText = translationSucceeded ? String(translatedChunk || "") : "";
     const root = doc.createElement("div");
     root.className = "reader-selection-replacer-test-part merged-translation";
     root.dataset.paragraphIndex = String(paragraphIndex);
@@ -2297,17 +2518,24 @@ var SelectionReplacerOverlay = {
       pointerEvents: "none"
     });
     root.append(textNode);
+    layer.append(root);
     let fitted;
     if (state.translationPending && !translation) {
       fitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
     }
-    else if (!translatedText) {
+    else if (!translationSucceeded) {
       const message = translation?.status === "skipped" ? "段落未翻译" : "段落翻译失败";
       fitted = this.renderTranslationStatus(textNode, "selection", message,
         translation?.errorCode || "missing-translation");
     }
+    else if (!translatedText) {
+      textNode.textContent = "";
+      fitted = { rendered: true, layoutMode: "selection-empty", lines: [], fontSize: 0,
+        lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
+        failureReason: "" };
+    }
     else {
-      fitted = this.fitAbstractText({ node: textNode, containerWidth: width,
+      fitted = this.fitSelectionText({ node: textNode, containerWidth: width,
         containerHeight: height, sourceRects: part.sourceRects, translatedText });
       if (!fitted.rendered) {
         const layoutFailure = fitted;
@@ -2328,7 +2556,6 @@ var SelectionReplacerOverlay = {
       });
       root.append(badge);
     }
-    layer.append(root);
     return { ...fitted, node: root };
   },
 
