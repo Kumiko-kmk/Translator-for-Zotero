@@ -34,25 +34,34 @@ var ContentSegments = {
   },
 
   fromSelection(match) {
-    return (match?.paragraphs || []).map((paragraph, index) => ({
-      id: `${paragraph.matchType === "unclassified" ? "u" : "p"}-${index}`,
-      kind: paragraph.matchType === "unclassified" ? "unclassified" : "custom",
-      sourceText: String(paragraph.selectedText || paragraph.sourceText || "").trim(),
-      sourceLanguage: this.detectLanguage(paragraph.selectedText || paragraph.sourceText),
-      sourceCharIDs: [...(paragraph.selectedCharIDs || [])].map(String),
-      sourceLineIDs: [],
-      position: paragraph.selectedPosition,
-      pageIndexes: (paragraph.selectedPosition?.fragments || [])
-        .map(fragment => Number(fragment.pageIndex || 0)),
-      confidence: paragraph.confidence || "low",
-      metadata: {
-        matchMethod: null,
-        metadataCoverage: null,
-        completeness: null,
-        sourceIndex: paragraph.sourceIndex ?? null,
-        matchType: paragraph.matchType || null,
-        selectionParagraphIndex: index
-      }
-    })).filter(segment => segment.position && segment.sourceText);
+    return (match?.paragraphs || []).map((paragraph, index) => {
+      const sourceText = String(paragraph.translationText
+        || paragraph.selectedText || paragraph.sourceText || "").trim();
+      const position = paragraph.translationPosition || paragraph.selectedPosition;
+      return {
+        id: `${paragraph.matchType === "unclassified" ? "u" : "p"}-${index}`,
+        kind: paragraph.matchType === "unclassified" ? "unclassified" : "custom",
+        sourceText,
+        sourceLanguage: this.detectLanguage(sourceText),
+        sourceCharIDs: [...(paragraph.translationCharIDs || paragraph.selectedCharIDs || [])]
+          .map(String),
+        sourceLineIDs: [...(paragraph.translationLineIDs || [])].map(String),
+        position,
+        pageIndexes: (position?.fragments || [])
+          .map(fragment => Number(fragment.pageIndex || 0)),
+        confidence: paragraph.confidence || "low",
+        metadata: {
+          matchMethod: null,
+          metadataCoverage: null,
+          completeness: null,
+          sourceIndex: paragraph.sourceIndex ?? null,
+          matchType: paragraph.matchType || null,
+          selectionParagraphIndex: index,
+          selectedText: String(paragraph.selectedText || ""),
+          selectedPosition: paragraph.selectedPosition || null,
+          translationIndentFirstBlock: Boolean(paragraph.translationIndentFirstBlock)
+        }
+      };
+    }).filter(segment => segment.position && segment.sourceText);
   }
 };

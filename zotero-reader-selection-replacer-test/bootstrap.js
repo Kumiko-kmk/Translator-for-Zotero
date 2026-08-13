@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.11";
+const PLUGIN_VERSION = "0.4.12";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
@@ -238,7 +238,149 @@ var SelectionMatcher = {
     return groups;
   },
 
-  makeUnclassifiedParagraphs(chars, startingOrder = 0) {
+  sameVisualLine(char, rect) {
+    if (!char?.rect || !rect) return false;
+    const charHeight = Math.max(1, char.rect[3] - char.rect[1]);
+    const lineHeight = Math.max(1, rect[3] - rect[1]);
+    const verticalOverlap = Math.max(0, Math.min(char.rect[3], rect[3])
+      - Math.max(char.rect[1], rect[1])) / Math.max(1, Math.min(charHeight, lineHeight));
+    const baselineDistance = Math.abs(((char.rect[1] + char.rect[3]) / 2)
+      - ((rect[1] + rect[3]) / 2));
+    return verticalOverlap >= 0.35
+      || baselineDistance <= Math.max(1.2, Math.min(charHeight, lineHeight) * 0.45);
+  },
+
+  splitVisualLineRuns(chars) {
+    const ordered = [...(chars || [])].filter(char => char?.rect).sort((left, right) =>
+      left.rect[0] - right.rect[0] || left.rect[2] - right.rect[2]
+      || Number(left.offset || 0) - Number(right.offset || 0));
+    if (!ordered.length) return [];
+    const heights = ordered.map(char => Math.max(1, char.rect[3] - char.rect[1]))
+      .sort((left, right) => left - right);
+    const medianHeight = heights[Math.floor(heights.length / 2)] || 12;
+    const maximumGap = Math.max(1, medianHeight * 3.2);
+    const runs = [];
+    for (const char of ordered) {
+      const previous = runs.at(-1)?.at(-1) || null;
+      const gap = previous ? char.rect[0] - previous.rect[2] : 0;
+      if (!previous || previous.lineBreakAfter || gap > maximumGap) runs.push([]);
+      runs.at(-1).push(char);
+    }
+    return runs;
+  },
+
+  buildPositionFromLineGroups(groups) {
+    const valid = (groups || []).filter(group => group?.rect);
+    if (!valid.length) return null;
+    const byPage = new Map();
+    for (const group of valid) {
+      if (!byPage.has(group.pageIndex)) byPage.set(group.pageIndex, []);
+      byPage.get(group.pageIndex).push(group);
+    }
+    const fragments = [...byPage.entries()].sort((left, right) => left[0] - right[0])
+      .map(([pageIndex, pageGroups]) => ({
+        pageIndex,
+        rects: pageGroups.map(group => group.rect),
+        sourceCharCount: pageGroups.reduce((sum, group) => sum
+          + Number(group.sourceCharCount || 0), 0),
+        lineCharCounts: pageGroups.map(group => Number(group.sourceCharCount || 0))
+      }));
+    return {
+      pageIndex: fragments[0].pageIndex,
+      rects: fragments[0].rects,
+      fragments
+    };
+  },
+
+  firstLineHasIndent(line, otherLines = []) {
+    const orderedChars = [...(line?.chars || [])].filter(char => char?.rect).sort((left, right) =>
+      left.rect[0] - right.rect[0] || Number(left.offset || 0) - Number(right.offset || 0));
+    const firstTextIndex = orderedChars.findIndex(char => !/^\s+$/u.test(String(char.c || "")));
+    if (firstTextIndex > 0 && orderedChars.slice(0, firstTextIndex)
+      .some(char => /^\s+$/u.test(String(char.c || "")))) return true;
+    const firstLeft = Number(line?.rect?.[0] || 0);
+    const comparable = (otherLines || [])
+      .filter(other => other?.rect && other.pageIndex === line.pageIndex && other !== line
+        && !other.rect.every((value, index) => value === line.rect[index]))
+      .map(other => ({
+        overlap: Math.max(0, Math.min(line.rect[2], other.rect[2])
+          - Math.max(line.rect[0], other.rect[0])),
+        width: Math.max(1, Math.min(
+          line.rect[2] - line.rect[0], other.rect[2] - other.rect[0]
+        )),
+        left: Number(other.rect[0] || 0),
+        distance: Math.abs(Number(other.rect[0] || 0) - firstLeft)
+      }))
+      .filter(candidate => candidate.overlap / candidate.width >= 0.42)
+      .sort((left, right) => left.distance - right.distance);
+    const height = Math.max(1, Number(line?.rect?.[3] || 0) - Number(line?.rect?.[1] || 0));
+    if (!comparable.length) return false;
+    const baseline = Math.min(...comparable.map(candidate => candidate.left));
+    return firstLeft - baseline >= Math.max(1.5, height * 0.55);
+  },
+
+  completeSelectionLines(selectedChars, allChars, sourceCharIDs = null) {
+    const selected = (selectedChars || []).filter(char => char?.rect);
+    const pageChars = (allChars || []).filter(char => char?.rect);
+    const selectedIDs = new Set(selected.map(char => String(char.id)));
+    const sourceIDs = sourceCharIDs ? new Set([...sourceCharIDs].map(String)) : null;
+    const baseChars = sourceIDs
+      ? pageChars.filter(char => sourceIDs.has(String(char.id)))
+      : selected;
+    const allBaseGroups = this.makeLineGroups(baseChars);
+    const baseGroups = allBaseGroups
+      .map((group, index) => ({ group, sourceLineIndex: index }))
+      .filter(entry => entry.group.charIDs
+        .some(id => selectedIDs.has(String(id))));
+    const lines = [];
+    for (const { group: baseGroup, sourceLineIndex } of baseGroups) {
+      const sameRow = pageChars.filter(char => Number(char.pageIndex || 0)
+        === Number(baseGroup.pageIndex || 0) && this.sameVisualLine(char, baseGroup.rect));
+      const runs = this.splitVisualLineRuns(sameRow)
+        .filter(run => run.some(char => selectedIDs.has(String(char.id))));
+      for (const run of runs) {
+        // Once a selected character identifies a visual line, keep every
+        // character from that line, while keeping classified paragraphs
+        // inside their own extracted paragraph boundary.
+        const lineChars = sourceIDs
+          ? run.filter(char => sourceIDs.has(String(char.id))
+            || /^\s+$/u.test(String(char.c || "")))
+          : run;
+        const rect = boundingRect(lineChars.map(char => char.rect));
+        if (!rect || !lineChars.some(char => !/^\s+$/u.test(String(char.c || "")))) continue;
+        lines.push({
+          pageIndex: Number(baseGroup.pageIndex || 0),
+          rect,
+          chars: lineChars,
+          charIDs: lineChars.map(char => String(char.id)),
+          sourceCharCount: lineChars.filter(char => !char.ignorable
+            && !/^\s+$/u.test(String(char.c || ""))).length,
+          sourceLineIndex,
+          text: this.reconstructText(lineChars)
+        });
+      }
+    }
+    lines.sort((left, right) => left.pageIndex - right.pageIndex
+      || left.rect[1] - right.rect[1] || left.rect[0] - right.rect[0]
+      || left.sourceLineIndex - right.sourceLineIndex);
+    const position = this.buildPositionFromLineGroups(lines);
+    const firstLine = lines.find(line => line.sourceLineIndex === 0) || null;
+    const comparisonLines = this.makeLineGroups(pageChars)
+      .filter(group => group.pageIndex === firstLine?.pageIndex);
+    const indentFirstBlock = Boolean(firstLine
+      && this.firstLineHasIndent(firstLine, comparisonLines));
+    return {
+      lines,
+      text: this.reconstructText(lines.flatMap(line => line.chars)),
+      charIDs: [...new Set(lines.flatMap(line => line.charIDs)
+        .filter(id => !/^\s+$/u.test(String((pageChars.find(char => String(char.id) === id)?.c) || ""))))],
+      lineIDs: lines.map((line, index) => `${line.pageIndex}:selection-line:${index}`),
+      position,
+      indentFirstBlock
+    };
+  },
+
+  makeUnclassifiedParagraphs(chars, startingOrder = 0, allChars = chars) {
     const lineGroups = this.makeLineGroups(chars);
     const paragraphs = [];
     let current = null;
@@ -274,7 +416,17 @@ var SelectionMatcher = {
         selectedRectCount: countPositionRects(selectedPosition),
         selectedPosition,
         matchType: "unclassified",
-        confidence: "low"
+        confidence: "low",
+        ...(() => {
+          const completed = this.completeSelectionLines(paragraph.chars, allChars);
+          return {
+            translationText: completed.text || this.reconstructText(paragraph.chars),
+            translationCharIDs: completed.charIDs,
+            translationLineIDs: completed.lineIDs,
+            translationPosition: completed.position || selectedPosition,
+            translationIndentFirstBlock: completed.indentFirstBlock
+          };
+        })()
       };
     }).filter(paragraph => paragraph.selectedPosition && paragraph.selectedCharIDs.length);
   },
@@ -408,6 +560,9 @@ var SelectionMatcher = {
       for (const id of sourceCharIDs) paragraphCharIDs.add(id);
       const selectedPosition = this.buildPosition(selectedParagraphChars);
       if (!selectedPosition) continue;
+      const completed = this.completeSelectionLines(
+        selectedParagraphChars, allChars, sourceCharIDs
+      );
       const full = selectedParagraphIDs.length >= sourceCharIDs.size;
       paragraphs.push({
         sourceIndex: Number(paragraph.sourceIndex || 0),
@@ -418,14 +573,20 @@ var SelectionMatcher = {
         selectedRectCount: countPositionRects(selectedPosition),
         selectedPosition,
         matchType: full ? "full" : "partial",
-        confidence: exactTextMatch || looseTextMatch ? "high" : "low"
+        confidence: exactTextMatch || looseTextMatch ? "high" : "low",
+        translationText: completed.text || this.reconstructText(selectedParagraphChars),
+        translationCharIDs: completed.charIDs,
+        translationLineIDs: completed.lineIDs,
+        translationPosition: completed.position || selectedPosition,
+        translationIndentFirstBlock: completed.indentFirstBlock
       });
     }
     paragraphs.sort((left, right) => left.sourceOrder - right.sourceOrder);
     const unclassifiedChars = selectedChars.filter(char => selectedIDs.has(char.id)
       && !paragraphCharIDs.has(char.id));
     const unclassifiedParagraphs = this.makeUnclassifiedParagraphs(unclassifiedChars,
-      paragraphs.length ? Math.max(...paragraphs.map(paragraph => paragraph.sourceOrder)) + 1 : 0);
+      paragraphs.length ? Math.max(...paragraphs.map(paragraph => paragraph.sourceOrder)) + 1 : 0,
+      allChars);
     paragraphs.push(...unclassifiedParagraphs);
     paragraphs.sort((left, right) => left.sourceOrder - right.sourceOrder);
     const unclassifiedCharCount = unclassifiedChars.length;
@@ -1928,7 +2089,9 @@ var SelectionReplacerOverlay = {
         Number(value?.metadata?.selectionParagraphIndex) === paragraphIndex) || null;
       const translation = segment ? record.translations?.get?.(segment.id) : null;
       const parts = [];
-      for (const fragment of positionFragments(paragraph.selectedPosition)) {
+      const position = segment?.position || paragraph.translationPosition
+        || paragraph.selectedPosition;
+      for (const fragment of positionFragments(position)) {
         const lineCounts = fragment.lineCharCounts || [];
         for (let index = 0; index < (fragment.rects || []).length; index++) {
           const rect = this.convertRect(state, fragment.rects[index], fragment.pageIndex);
@@ -2572,7 +2735,9 @@ var SelectionReplacerOverlay = {
     else {
       fitted = this.fitSelectionText({ node: textNode, containerWidth: width,
         containerHeight: height, sourceRects: part.sourceRects, translatedText,
-        indentFirstBlock: partIndex === 0 });
+        indentFirstBlock: partIndex === 0
+          && Boolean(paragraph.translationIndentFirstBlock
+            || segment?.metadata?.translationIndentFirstBlock) });
       if (!fitted.rendered) {
         const layoutFailure = fitted;
         const status = this.renderTranslationStatus(textNode, "selection",

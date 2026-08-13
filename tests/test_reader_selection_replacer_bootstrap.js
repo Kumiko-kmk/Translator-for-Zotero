@@ -35,6 +35,9 @@ const context = {
 context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(bootstrap, context, { filename: bootstrapPath });
+vm.runInContext(fs.readFileSync(path.resolve(
+  __dirname, "..", "zotero-reader-selection-replacer-test", "content-segments.js"
+), "utf8"), context, { filename: "content-segments.js" });
 
 const matcher = context.SelectionMatcher;
 const splitReplacement = context.splitReplacement;
@@ -108,6 +111,41 @@ function positionForLines(fixture, lineIndexes) {
   return { pageIndex: 0, rects, fragments: [{ pageIndex: 0, rects }] };
 }
 
+function makePartialLineFixture({ indented = false } = {}) {
+  const chars = [];
+  const lineRects = [];
+  const textLines = [
+    indented ? "  Alpha complete line" : "Alpha complete line",
+    "Beta complete line"
+  ];
+  let offset = 0;
+  for (const [lineIndex, text] of textLines.entries()) {
+    const left = indented && lineIndex === 0 ? 20 : 0;
+    const top = lineIndex * 20;
+    const rect = [left, top, left + text.length * 8, top + 10];
+    lineRects.push(rect);
+    for (const [charIndex, c] of [...text].entries()) {
+      chars.push({
+        id: `0:char:${offset++}`,
+        offset: offset - 1,
+        pageIndex: 0,
+        c,
+        rect: [left + charIndex * 8, top, left + charIndex * 8 + 7, top + 10],
+        lineBreakAfter: charIndex === [...text].length - 1,
+        ignorable: false
+      });
+    }
+  }
+  const sourceCharIDs = chars.filter(char => !/^\s+$/u.test(char.c)).map(char => char.id);
+  const rawParagraphs = [{ sourceIndex: 0, sourceOrder: 0, text: textLines.join(" "), sourceCharIDs }];
+  return {
+    pages: [{ pageIndex: 0, chars }],
+    rawParagraphs,
+    chars,
+    sourceText: "Alpha"
+  };
+}
+
 function makeCrossPageFixture() {
   const pages = [];
   const fragments = [];
@@ -168,6 +206,42 @@ function makeCrossPageFixture() {
   assert.strictEqual(match.paragraphs[0].matchType, "full");
   assert.strictEqual(match.paragraphs[0].selectedRectCount, 8);
   assert.strictEqual(match.paragraphs[0].selectedPosition.fragments[0].rects.length, 8);
+}
+
+{
+  const fixture = makePartialLineFixture();
+  const firstLine = fixture.pages[0].chars.filter(char => char.rect[1] === 0);
+  const selected = firstLine.slice(0, 5);
+  const position = {
+    pageIndex: 0,
+    rects: [[0, 0, 40, 10]],
+    fragments: [{ pageIndex: 0, rects: [[0, 0, 40, 10]] }]
+  };
+  const match = matcher.analyze({ ...fixture, position, sourceText: "Alpha" });
+  const paragraph = match.paragraphs[0];
+  assert.strictEqual(paragraph.selectedText, "Alpha");
+  assert.strictEqual(paragraph.translationText, "Alpha complete line");
+  assert.ok(paragraph.translationPosition.fragments[0].rects[0][2] > 40);
+  const segment = context.ContentSegments.fromSelection(match)[0];
+  assert.strictEqual(segment.sourceText, "Alpha complete line");
+  assert.strictEqual(segment.metadata.selectedText, "Alpha");
+}
+
+{
+  const indented = matcher.analyze({
+    ...makePartialLineFixture({ indented: true }),
+    position: { pageIndex: 0, rects: [[20, 0, 60, 10]],
+      fragments: [{ pageIndex: 0, rects: [[20, 0, 60, 10]] }] },
+    sourceText: "Alpha"
+  });
+  assert.strictEqual(indented.paragraphs[0].translationIndentFirstBlock, true);
+  const plain = matcher.analyze({
+    ...makePartialLineFixture(),
+    position: { pageIndex: 0, rects: [[0, 0, 40, 10]],
+      fragments: [{ pageIndex: 0, rects: [[0, 0, 40, 10]] }] },
+    sourceText: "Alpha"
+  });
+  assert.strictEqual(plain.paragraphs[0].translationIndentFirstBlock, false);
 }
 
 {
