@@ -497,6 +497,14 @@ assert.strictEqual(
   assert.deepStrictEqual(Array.from(selection.records.keys()), [
     "front-matter", "selection-test-1"
   ]);
+  selection.records.get("selection-test-1").displayModes.set(
+    "selection:p-0:0", "original");
+  overlay.attach(reader, view, { paragraphs: [] }, {
+    mode: "selection-translation", recordID: "selection-test-1",
+    segments: [], translations: new Map(), translationPending: false
+  });
+  assert.strictEqual(selection.records.get("selection-test-1").displayModes.get(
+    "selection:p-0:0"), "original");
   overlay.remove(reader);
   assert.strictEqual(overlay.states.has(reader), false);
 }
@@ -616,12 +624,44 @@ assert.strictEqual(
 }
 
 {
+  const root = {
+    style: {},
+    dataset: {},
+    addEventListener(name, handler) { this[`on${name}`] = handler; }
+  };
+  const textNode = { style: {} };
+  const record = { displayModes: new Map() };
+  const rendered = [];
+  overlay.bindTranslationToggle(record, root, textNode, {
+    displayKey: "selection:p-0:0",
+    renderDisplay(showingOriginal) { rendered.push(showingOriginal); }
+  });
+  assert.strictEqual(root.style.pointerEvents, "auto");
+  assert.strictEqual(root.dataset.translationDisplayMode, "translation");
+  let prevented = 0;
+  let stopped = 0;
+  root.onclick({ button: 0, preventDefault() { prevented++; },
+    stopPropagation() { stopped++; } });
+  assert.deepStrictEqual(rendered, [true]);
+  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "original");
+  assert.strictEqual(root.dataset.translationDisplayMode, "original");
+  root.onclick({ button: 0, preventDefault() { prevented++; },
+    stopPropagation() { stopped++; } });
+  assert.deepStrictEqual(rendered, [true, false]);
+  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "translation");
+  root.onclick({ button: 2 });
+  assert.deepStrictEqual(rendered, [true, false]);
+  assert.strictEqual(prevented, 2);
+  assert.strictEqual(stopped, 2);
+}
+
+{
   const abstractSuccess = overlay.translationDecoration("abstract", "success");
   assert.strictEqual(abstractSuccess.border, "none");
   assert.strictEqual(abstractSuccess.showBadge, false);
   assert.strictEqual(abstractSuccess.badgeText, "");
   const abstractFailure = overlay.translationDecoration("abstract", "failure");
-  assert.strictEqual(abstractFailure.border, "1px dashed #f97316");
+  assert.strictEqual(abstractFailure.border, "none");
   assert.strictEqual(abstractFailure.showBadge, true);
   assert.strictEqual(abstractFailure.badgeText, "摘要状态");
   const titleSuccess = overlay.translationDecoration("title", "success");
@@ -632,6 +672,38 @@ assert.strictEqual(
   assert.strictEqual(titleFailure.border, "none");
   assert.strictEqual(titleFailure.showBadge, false);
   assert.strictEqual(titleFailure.badgeText, "");
+}
+
+{
+  const root = {
+    style: {},
+    dataset: {},
+    addEventListener(name, handler) { this[`on${name}`] = handler; }
+  };
+  const textNode = { style: {} };
+  const record = { displayModes: new Map() };
+  const rendered = [];
+  overlay.bindTranslationToggle(record, root, textNode, {
+    displayKey: "selection:p-0:0",
+    renderDisplay(showingOriginal) { rendered.push(showingOriginal); }
+  });
+  assert.strictEqual(root.style.pointerEvents, "auto");
+  assert.strictEqual(root.dataset.translationDisplayMode, "translation");
+  let prevented = 0;
+  let stopped = 0;
+  root.onclick({ button: 0, preventDefault() { prevented++; },
+    stopPropagation() { stopped++; } });
+  assert.deepStrictEqual(rendered, [true]);
+  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "original");
+  assert.strictEqual(root.dataset.translationDisplayMode, "original");
+  root.onclick({ button: 0, preventDefault() { prevented++; },
+    stopPropagation() { stopped++; } });
+  assert.deepStrictEqual(rendered, [true, false]);
+  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "translation");
+  root.onclick({ button: 2 });
+  assert.deepStrictEqual(rendered, [true, false]);
+  assert.strictEqual(prevented, 2);
+  assert.strictEqual(stopped, 2);
 }
 
 {

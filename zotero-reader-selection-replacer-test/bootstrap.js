@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.12";
+const PLUGIN_VERSION = "0.4.13";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
@@ -1868,6 +1868,7 @@ var SelectionReplacerOverlay = {
       translations: options.translations || new Map(),
       translationPending: Boolean(options.translationPending),
       replacement: String(options.replacement || ""),
+      displayModes: previous?.displayModes || new Map(),
       sequence: previous?.sequence ?? state.nextSequence++
     });
     this.schedule(state, 0);
@@ -2068,7 +2069,7 @@ var SelectionReplacerOverlay = {
         const merged = target.kind === "title"
           ? this.mergeTitleParts(parts) : this.mergeTargetParts(parts);
         const results = merged.map((part, partIndex) => this.renderTranslatedTarget(
-          state, part, target, targetIndex, partIndex, translatedText, translation));
+          state, part, target, targetIndex, partIndex, translatedText, translation, record));
         record.targetLayoutResults ||= new Map();
         record.targetLayoutResults.set(target.kind, results);
         if (results.length) continue;
@@ -2111,9 +2112,14 @@ var SelectionReplacerOverlay = {
       const chunks = translatedText
         ? this.splitSelectionTranslation(translatedText, merged)
         : merged.map(() => "");
+      const sourceText = String(segment?.sourceText
+        || paragraph.translationText || paragraph.sourceText || "");
+      const sourceChunks = sourceText
+        ? this.splitSelectionTranslation(sourceText, merged)
+        : merged.map(() => "");
       const results = merged.map((part, partIndex) => this.renderTranslatedSelectionTarget(
         state, part, paragraph, segment, paragraphIndex, partIndex, displayIndex,
-        translation, chunks[partIndex] || "", record));
+        translation, chunks[partIndex] || "", sourceChunks[partIndex] || "", record));
       record.selectionLayoutResults ||= new Map();
       if (segment) record.selectionLayoutResults.set(segment.id, results);
     });
@@ -2577,8 +2583,41 @@ var SelectionReplacerOverlay = {
     };
   },
 
+  translationDisplayKey({ targetKind = "", targetIndex = 0, partIndex = 0,
+    segmentID = "" } = {}) {
+    if (segmentID) return `selection:${segmentID}:${partIndex}`;
+    return `auto:${targetKind}:${targetIndex}:${partIndex}`;
+  },
+
+  bindTranslationToggle(record, root, textNode, options = {}) {
+    const displayKey = String(options.displayKey || "");
+    const renderDisplay = typeof options.renderDisplay === "function"
+      ? options.renderDisplay : null;
+    if (!record || !root || !textNode || !displayKey || !renderDisplay) return;
+    const displayModes = record.displayModes instanceof Map
+      ? record.displayModes : (record.displayModes = new Map());
+    const updateDataset = () => {
+      const showingOriginal = displayModes.get(displayKey) === "original";
+      root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
+      return showingOriginal;
+    };
+    root.style.pointerEvents = "auto";
+    root.style.cursor = "pointer";
+    root.dataset.translationDisplayKey = displayKey;
+    updateDataset();
+    root.addEventListener("click", event => {
+      if (event && event.button !== undefined && Number(event.button) !== 0) return;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      const showingOriginal = displayModes.get(displayKey) === "original";
+      displayModes.set(displayKey, showingOriginal ? "translation" : "original");
+      updateDataset();
+      renderDisplay(displayModes.get(displayKey) === "original");
+    });
+  },
+
   renderTranslatedTarget(state, part, target, targetIndex, partIndex, translatedText,
-    translation = null) {
+    translation = null, record = null) {
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2622,39 +2661,55 @@ var SelectionReplacerOverlay = {
     });
     root.append(textNode);
     layer.append(root);
-    let fitted;
-    if (!translatedText) {
-      fitted = this.renderTranslationStatus(textNode, target.kind,
-        target.kind === "title" ? "标题翻译失败" : "摘要翻译失败",
-        translation?.errorCode || "missing-translation");
-    }
-    else if (target.kind === "title") {
-      fitted = this.fitTitleText({ node: textNode, containerWidth: width,
-        containerHeight: height, sourceRects: part.sourceRects, translatedText });
-      if (!fitted.rendered) {
-        const layoutFailure = fitted;
-        const status = this.renderTranslationStatus(textNode, target.kind,
-          "标题无法排版", layoutFailure.failureReason);
-        fitted = { ...status, ...layoutFailure, rendered: true,
-          layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+    const originalText = String(target.text || "");
+    const displayKey = this.translationDisplayKey({ targetKind: target.kind,
+      targetIndex, partIndex });
+    const renderDisplay = showingOriginal => {
+      const displayText = showingOriginal ? originalText : translatedText;
+      let displayFitted;
+      if (!displayText) {
+        displayFitted = this.renderTranslationStatus(textNode, target.kind,
+          target.kind === "title" ? "标题翻译失败" : "摘要翻译失败",
+          translation?.errorCode || "missing-translation");
       }
-    }
-    else if (target.kind === "abstract") {
-      fitted = this.fitAbstractText({ node: textNode, containerWidth: width,
-        containerHeight: height, sourceRects: part.sourceRects, translatedText,
-        indentFirstBlock: partIndex === 0 });
-      if (!fitted.rendered) {
-        const layoutFailure = fitted;
-        const status = this.renderTranslationStatus(textNode, target.kind,
-          "摘要无法排版", layoutFailure.failureReason);
-        fitted = { ...status, ...layoutFailure, rendered: true,
-          layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+      else if (target.kind === "title") {
+        displayFitted = this.fitTitleText({ node: textNode, containerWidth: width,
+          containerHeight: height, sourceRects: part.sourceRects,
+          translatedText: displayText });
+        if (!displayFitted.rendered) {
+          const layoutFailure = displayFitted;
+          const status = this.renderTranslationStatus(textNode, target.kind,
+            "标题无法排版", layoutFailure.failureReason);
+          displayFitted = { ...status, ...layoutFailure, rendered: true,
+            layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+        }
       }
-    }
-    else fitted = this.renderTranslationStatus(textNode, target.kind,
-      "译文无法排版", "unsupported-target-kind");
-    const displayStatus = translatedText && !String(fitted.layoutMode || "").endsWith("-status")
+      else if (target.kind === "abstract") {
+        displayFitted = this.fitAbstractText({ node: textNode, containerWidth: width,
+          containerHeight: height, sourceRects: part.sourceRects,
+          translatedText: displayText,
+          indentFirstBlock: !showingOriginal && partIndex === 0 });
+        if (!displayFitted.rendered) {
+          const layoutFailure = displayFitted;
+          const status = this.renderTranslationStatus(textNode, target.kind,
+            "摘要无法排版", layoutFailure.failureReason);
+          displayFitted = { ...status, ...layoutFailure, rendered: true,
+            layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+        }
+      }
+      else displayFitted = this.renderTranslationStatus(textNode, target.kind,
+        "译文无法排版", "unsupported-target-kind");
+      root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
+      return displayFitted;
+    };
+    const storedOriginal = record?.displayModes?.get?.(displayKey) === "original";
+    const translationFitted = renderDisplay(false);
+    const displayStatus = ["cached", "translated"].includes(translation?.status)
+      && translatedText && !String(translationFitted.layoutMode || "").endsWith("-status")
       ? "success" : "failure";
+    const showingOriginal = Boolean(storedOriginal && displayStatus === "success" && originalText);
+    if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
+    const fitted = showingOriginal ? renderDisplay(true) : translationFitted;
     const decoration = this.translationDecoration(target.kind, displayStatus);
     root.style.border = decoration.border;
     root.dataset.translationDisplayStatus = displayStatus;
@@ -2667,11 +2722,15 @@ var SelectionReplacerOverlay = {
         font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none" });
       root.append(badge);
     }
+    if (displayStatus === "success" && originalText) {
+      this.bindTranslationToggle(record, root, textNode, { displayKey, renderDisplay });
+    }
     return { ...fitted, node: root };
   },
 
   renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
-    partIndex, displayIndex, translation = null, translatedChunk = "", record = null) {
+    partIndex, displayIndex, translation = null, translatedChunk = "", sourceChunk = "",
+    record = null) {
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2701,7 +2760,7 @@ var SelectionReplacerOverlay = {
       position: "absolute", boxSizing: "border-box",
       left: `${Math.max(0, left)}px`, top: `${Math.max(0, top)}px`,
       width: `${width}px`, height: `${height}px`, overflow: "hidden",
-      border: `1px solid ${accent}`, background: colors.background,
+      border: "none", background: colors.background,
       pointerEvents: "none"
     });
     const textNode = doc.createElement("div");
@@ -2717,35 +2776,52 @@ var SelectionReplacerOverlay = {
     });
     root.append(textNode);
     layer.append(root);
-    let fitted;
-    if (record?.translationPending && !translation) {
-      fitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
-    }
-    else if (!translationSucceeded) {
-      const message = translation?.status === "skipped" ? "段落未翻译" : "段落翻译失败";
-      fitted = this.renderTranslationStatus(textNode, "selection", message,
-        translation?.errorCode || "missing-translation");
-    }
-    else if (!translatedText) {
-      textNode.textContent = "";
-      fitted = { rendered: true, layoutMode: "selection-empty", lines: [], fontSize: 0,
-        lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
-        failureReason: "" };
-    }
-    else {
-      fitted = this.fitSelectionText({ node: textNode, containerWidth: width,
-        containerHeight: height, sourceRects: part.sourceRects, translatedText,
-        indentFirstBlock: partIndex === 0
-          && Boolean(paragraph.translationIndentFirstBlock
-            || segment?.metadata?.translationIndentFirstBlock) });
-      if (!fitted.rendered) {
-        const layoutFailure = fitted;
-        const status = this.renderTranslationStatus(textNode, "selection",
-          "段落无法排版", layoutFailure.failureReason);
-        fitted = { ...status, ...layoutFailure, rendered: true,
-          layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+    const indentFirstBlock = partIndex === 0
+      && Boolean(paragraph.translationIndentFirstBlock
+        || segment?.metadata?.translationIndentFirstBlock);
+    const displayKey = this.translationDisplayKey({ segmentID: segment?.id || "",
+      partIndex });
+    const renderDisplay = showingOriginal => {
+      const displayText = showingOriginal ? sourceChunk : translatedText;
+      let displayFitted;
+      if (record?.translationPending && !translation && !showingOriginal) {
+        displayFitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
       }
-    }
+      else if (!translationSucceeded && !showingOriginal) {
+        const message = translation?.status === "skipped" ? "段落未翻译" : "段落翻译失败";
+        displayFitted = this.renderTranslationStatus(textNode, "selection", message,
+          translation?.errorCode || "missing-translation");
+      }
+      else if (!displayText) {
+        textNode.textContent = "";
+        displayFitted = { rendered: true, layoutMode: "selection-empty", lines: [],
+          fontSize: 0, lineHeight: 0, sourceRectCount: part.sourceRects.length,
+          mergedRectCount: 1, failureReason: "" };
+      }
+      else {
+        displayFitted = this.fitSelectionText({ node: textNode, containerWidth: width,
+          containerHeight: height, sourceRects: part.sourceRects,
+          translatedText: displayText,
+          indentFirstBlock: !showingOriginal && indentFirstBlock });
+        if (!displayFitted.rendered) {
+          const layoutFailure = displayFitted;
+          const status = this.renderTranslationStatus(textNode, "selection",
+            "段落无法排版", layoutFailure.failureReason);
+          displayFitted = { ...status, ...layoutFailure, rendered: true,
+            layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+        }
+      }
+      root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
+      return displayFitted;
+    };
+    const storedOriginal = record?.displayModes?.get?.(displayKey) === "original";
+    const translationFitted = renderDisplay(false);
+    const displayStatus = translationSucceeded && translatedText
+      && !String(translationFitted.layoutMode || "").endsWith("-status")
+      ? "success" : "failure";
+    const showingOriginal = Boolean(storedOriginal && displayStatus === "success" && sourceChunk);
+    if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
+    const fitted = showingOriginal ? renderDisplay(true) : translationFitted;
     if (partIndex === 0) {
       const badge = doc.createElement("span");
       badge.className = "reader-selection-replacer-test-paragraph-badge";
@@ -2756,6 +2832,10 @@ var SelectionReplacerOverlay = {
         whiteSpace: "nowrap", pointerEvents: "none"
       });
       root.append(badge);
+    }
+    root.dataset.translationDisplayStatus = displayStatus;
+    if (displayStatus === "success" && sourceChunk) {
+      this.bindTranslationToggle(record, root, textNode, { displayKey, renderDisplay });
     }
     return { ...fitted, node: root };
   },
@@ -2768,9 +2848,9 @@ var SelectionReplacerOverlay = {
       return { border: "none", showBadge: false, badgeText: "" };
     }
     if (kind === "abstract") {
-      return { border: "1px dashed #f97316", showBadge: true, badgeText: "摘要状态" };
+      return { border: "none", showBadge: true, badgeText: "摘要状态" };
     }
-    return { border: "2px solid #2563eb", showBadge: true, badgeText: "标题译文" };
+    return { border: "none", showBadge: true, badgeText: "标题译文" };
   },
 
   renderTranslationStatus(node, kind, message, failureReason) {
