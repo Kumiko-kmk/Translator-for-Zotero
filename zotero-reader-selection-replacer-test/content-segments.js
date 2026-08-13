@@ -37,8 +37,8 @@ var ContentSegments = {
     return (match?.paragraphs || []).map((paragraph, index) => ({
       id: `${paragraph.matchType === "unclassified" ? "u" : "p"}-${index}`,
       kind: paragraph.matchType === "unclassified" ? "unclassified" : "custom",
-      sourceText: String(paragraph.sourceText || "").trim(),
-      sourceLanguage: this.detectLanguage(paragraph.sourceText),
+      sourceText: String(paragraph.selectedText || paragraph.sourceText || "").trim(),
+      sourceLanguage: this.detectLanguage(paragraph.selectedText || paragraph.sourceText),
       sourceCharIDs: [...(paragraph.selectedCharIDs || [])].map(String),
       sourceLineIDs: [],
       position: paragraph.selectedPosition,
@@ -50,9 +50,9 @@ var ContentSegments = {
         metadataCoverage: null,
         completeness: null,
         sourceIndex: paragraph.sourceIndex ?? null,
-        matchType: paragraph.matchType || null
+        matchType: paragraph.matchType || null,
+        selectionParagraphIndex: index
       }
-    })).filter(segment => segment.position);
+    })).filter(segment => segment.position && segment.sourceText);
   }
 };
-

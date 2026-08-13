@@ -6,6 +6,7 @@ const DEEPSEEK_USERNAME = "default";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
 const TRANSLATION_PROMPT_VERSION = "front-matter-translation-v2-title-break";
+const SELECTION_TRANSLATION_PROMPT_VERSION = "selection-translation-v1";
 const TITLE_BREAK_MARKER = "<br>";
 const TRANSLATION_CACHE_FILE = "paper-assistant-segment-translations.sqlite";
 const API_KEY_PROMPTED_PREF = "extensions.reader-selection-replacer.apiKeyPrompted";
@@ -134,8 +135,13 @@ var SegmentTranslationCache = {
       targetLanguage,
       provider: "deepseek",
       model: DEEPSEEK_MODEL,
-      promptVersion: TRANSLATION_PROMPT_VERSION
+      promptVersion: this.promptVersion(segment)
     };
+  },
+
+  promptVersion(segment) {
+    return ["custom", "unclassified"].includes(segment?.kind)
+      ? SELECTION_TRANSLATION_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION;
   },
 
   values(key) {
@@ -174,7 +180,19 @@ var SegmentTranslationCache = {
 };
 
 var DeepSeekTranslationClient = {
-  prompt(repair = false) {
+  prompt(repair = false, segments = []) {
+    const selection = (segments || []).some(segment =>
+      ["custom", "unclassified"].includes(segment?.kind));
+    if (selection) {
+      return [
+        "将用户从英文学术 PDF 中划选的正文段落或文本忠实翻译为简体中文。",
+        "只返回 JSON：{\"translations\":[{\"id\":\"p-0\",\"zh\":\"中文\"}]}。",
+        "每个输入 id 恰好返回一次；不得解释、总结、增删事实或使用 Markdown。",
+        "保持术语、数字、单位、缩写、变量、引用和原文语气准确。",
+        "自定义段落译文必须是纯文本，禁止 <br>、任何 HTML 标签和 Markdown。",
+        repair ? "上次输出未通过校验，请完整重译并严格遵循 JSON、纯文本和逐段对应规则。" : ""
+      ].filter(Boolean).join("\n");
+    }
     return [
       "将英文学术论文的标题和摘要忠实翻译为简体中文。",
       "只返回 JSON：{\"translations\":[{\"id\":\"title\",\"zh\":\"中文\"}]}。",
@@ -237,8 +255,11 @@ var DeepSeekTranslationClient = {
       const segment = segments.find(value => value.id === id);
       if (segment?.kind === "title") zh = this.normalizeTitleTranslation(zh);
       else if (/<\s*br\s*\/?>/iu.test(zh) || /<[^>]+>/u.test(zh)) {
-        throw Object.assign(new Error("摘要译文包含不允许的换行或 HTML 标记"),
-          { code: "invalid-abstract-html" });
+        const selection = ["custom", "unclassified"].includes(segment?.kind);
+        throw Object.assign(new Error(selection
+          ? "自定义段落译文包含不允许的换行或 HTML 标记"
+          : "摘要译文包含不允许的换行或 HTML 标记"),
+        { code: selection ? "invalid-selection-html" : "invalid-abstract-html" });
       }
       result.set(id, zh);
     }
@@ -252,7 +273,7 @@ var DeepSeekTranslationClient = {
       temperature: 0.1,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: this.prompt(repair) },
+        { role: "system", content: this.prompt(repair, segments) },
         { role: "user", content: JSON.stringify({
           segments: segments.map(segment => ({ id: segment.id, kind: segment.kind, text: segment.sourceText }))
         }) }
@@ -314,7 +335,7 @@ var TranslationCoordinator = {
       translatedText,
       provider: "deepseek",
       model: DEEPSEEK_MODEL,
-      promptVersion: TRANSLATION_PROMPT_VERSION,
+      promptVersion: SegmentTranslationCache.promptVersion(segment),
       errorCode: error?.code || (error?.status ? `http-${error.status}` : ""),
       errorMessage: error ? String(error.message || error).slice(0, 500) : ""
     };
@@ -325,9 +346,12 @@ var TranslationCoordinator = {
     const results = new Map();
     const eligible = [];
     for (const segment of segments || []) {
-      if (!["title", "abstract"].includes(segment.kind)
-        || segment.sourceLanguage !== sourceLanguage
-        || !["high", "medium"].includes(segment.confidence)) {
+      const frontMatter = ["title", "abstract"].includes(segment.kind);
+      const selection = ["custom", "unclassified"].includes(segment.kind);
+      const eligibleKind = frontMatter || selection;
+      const confidenceAllowed = selection
+        || ["high", "medium"].includes(segment.confidence);
+      if (!eligibleKind || segment.sourceLanguage !== sourceLanguage || !confidenceAllowed) {
         results.set(segment.id, this.result(segment, "skipped"));
         continue;
       }

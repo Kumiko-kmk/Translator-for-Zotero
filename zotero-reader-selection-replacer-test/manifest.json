@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Paper Assistant Reader Selection Replacer Test",
-  "version": "0.4.8",
-  "description": "Automatically locate and translate PDF title and abstract, with reusable selection segments.",
+  "version": "0.4.9",
+  "description": "Automatically translate PDF front matter and user-selected paragraphs with reusable overlays.",
   "author": "Kumiko",
   "applications": {
     "zotero": {

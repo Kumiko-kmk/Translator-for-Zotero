@@ -10,7 +10,7 @@ PLUGIN = ROOT / "zotero-reader-selection-replacer-test"
 def test_selection_replacer_manifest_is_independent() -> None:
     manifest = json.loads((PLUGIN / "manifest.json").read_text(encoding="utf-8"))
     zotero = manifest["applications"]["zotero"]
-    assert manifest["version"] == "0.4.8"
+    assert manifest["version"] == "0.4.9"
     assert zotero["id"] == "reader-selection-replacer-test@local.kumiko"
     assert zotero["strict_min_version"] == "9.0"
     assert zotero["strict_max_version"] == "9.*"
@@ -25,7 +25,9 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "getSelectionPosition" in source
     assert "getClientRect" in source
     assert "reader-selection-replacer-test-layer" in source
-    assert "DEFAULT_REPLACEMENT" in source
+    assert 'button.textContent = "翻译"' in source
+    assert "DEFAULT_REPLACEMENT" not in source
+    assert "replaceSelection" not in source
     assert "SelectionMatcher" in source
     assert "ReaderPageDataLoader" in source
     assert "getPageData" in source
@@ -60,7 +62,10 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "diagnostic" in source
     assert "标题" in source
     assert "摘要" in source
-    assert "0.4.8" in source
+    assert "0.4.9" in source
+    assert "selection-translation" in source
+    assert "renderSelectionTranslations" in source
+    assert "translateSelection" in source
     assert 'source: parent ? "parent-item" : "none"' in source
     assert 'source: parent ? "parent-item" : (title || abstractText ? "attachment" : "none")' not in source
     assert "function sleep(" not in source
@@ -74,7 +79,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
 
 
 def test_selection_replacer_xpi_contents() -> None:
-    xpi = ROOT / "dist" / "reader-selection-replacer-test-0.4.8.xpi"
+    xpi = ROOT / "dist" / "reader-selection-replacer-test-0.4.9.xpi"
     if not xpi.exists():
         return
     with zipfile.ZipFile(xpi) as archive:
@@ -87,7 +92,7 @@ def test_selection_replacer_xpi_contents() -> None:
             "translation-service.js",
         }
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["version"] == "0.4.8"
+        assert manifest["version"] == "0.4.9"
         assert archive.read("bootstrap.js") == (PLUGIN / "bootstrap.js").read_bytes()
         assert archive.read("page-data-body-extractor.js") == (
             PLUGIN / "page-data-body-extractor.js"

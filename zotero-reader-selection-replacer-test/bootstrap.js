@@ -1,12 +1,11 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.8";
+const PLUGIN_VERSION = "0.4.9";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
 const LAYER_CLASS = "reader-selection-replacer-test-layer";
-const DEFAULT_REPLACEMENT = "【测试替换】";
 const PARAGRAPH_MARK_COLORS = [
   "#0ea5e9", "#f97316", "#22c55e", "#a855f7", "#eab308", "#ec4899"
 ];
@@ -268,6 +267,7 @@ var SelectionMatcher = {
         sourceIndex: null,
         sourceOrder: startingOrder + index,
         sourceText: this.reconstructText(paragraph.chars),
+        selectedText: this.reconstructText(paragraph.chars),
         selectedCharIDs: paragraph.chars
           .filter(char => !char.ignorable && !/^\s+$/u.test(char.c)).map(char => char.id),
         selectedRectCount: countPositionRects(selectedPosition),
@@ -412,6 +412,7 @@ var SelectionMatcher = {
         sourceIndex: Number(paragraph.sourceIndex || 0),
         sourceOrder: Number(paragraph.sourceOrder || paragraph.sourceIndex || 0),
         sourceText: String(paragraph.text || ""),
+        selectedText: this.reconstructText(selectedParagraphChars),
         selectedCharIDs: selectedParagraphIDs,
         selectedRectCount: countPositionRects(selectedPosition),
         selectedPosition,
@@ -1668,6 +1669,7 @@ var SelectionReplacerOverlay = {
       targets: Array.isArray(data) ? data : [],
       segments: options.segments || [],
       translations: options.translations || new Map(),
+      translationPending: Boolean(options.translationPending),
       replacement: String(options.replacement || ""),
       cancelled: false,
       overlayLayers: new Map(),
@@ -1828,6 +1830,10 @@ var SelectionReplacerOverlay = {
       this.renderTargets(state);
       return;
     }
+    if (state.mode === "selection-translation") {
+      this.renderSelectionTranslations(state);
+      return;
+    }
     const paragraphs = state.match?.paragraphs || [];
     const displayCounts = { paragraph: 0, unclassified: 0 };
     paragraphs.forEach((paragraph, paragraphIndex) => {
@@ -1881,6 +1887,40 @@ var SelectionReplacerOverlay = {
       parts.forEach((part, partIndex) => this.renderTargetPart(state, part, target,
         targetIndex, partIndex));
     }
+  },
+
+  renderSelectionTranslations(state) {
+    const paragraphs = state.match?.paragraphs || [];
+    const displayCounts = { paragraph: 0, unclassified: 0 };
+    paragraphs.forEach((paragraph, paragraphIndex) => {
+      const unclassified = paragraph.matchType === "unclassified";
+      const displayKind = unclassified ? "unclassified" : "paragraph";
+      const displayIndex = displayCounts[displayKind]++;
+      const segment = (state.segments || []).find(value =>
+        Number(value?.metadata?.selectionParagraphIndex) === paragraphIndex) || null;
+      const translation = segment ? state.translations?.get?.(segment.id) : null;
+      const parts = [];
+      for (const fragment of positionFragments(paragraph.selectedPosition)) {
+        const lineCounts = fragment.lineCharCounts || [];
+        for (let index = 0; index < (fragment.rects || []).length; index++) {
+          const rect = this.convertRect(state, fragment.rects[index], fragment.pageIndex);
+          if (rect) {
+            parts.push({
+              pageIndex: Number(fragment.pageIndex || 0),
+              rect,
+              sourceCharCount: Number(lineCounts[index] || 0)
+            });
+          }
+        }
+      }
+      const merged = this.mergeTargetParts(parts);
+      if (!merged.length) return;
+      const results = merged.map((part, partIndex) => this.renderTranslatedSelectionTarget(
+        state, part, paragraph, segment, paragraphIndex, partIndex, displayIndex,
+        translation));
+      state.selectionLayoutResults ||= new Map();
+      if (segment) state.selectionLayoutResults.set(segment.id, results);
+    });
   },
 
   mergeTargetParts(parts) {
@@ -2211,6 +2251,87 @@ var SelectionReplacerOverlay = {
     return { ...fitted, node: root };
   },
 
+  renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
+    partIndex, displayIndex, translation = null) {
+    const layer = this.ensureLayer(state, part.pageIndex);
+    if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
+      lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
+      failureReason: "page-layer-unavailable", node: null };
+    const doc = layer.ownerDocument;
+    const [left, top, right, bottom] = part.rect;
+    const width = Math.max(1, right - left);
+    const height = Math.max(1, bottom - top);
+    const unclassified = paragraph.matchType === "unclassified";
+    const accent = unclassified ? "#f59e0b"
+      : PARAGRAPH_MARK_COLORS[paragraphIndex % PARAGRAPH_MARK_COLORS.length];
+    const label = `${unclassified ? "U" : "P"}${displayIndex + 1}`;
+    const colors = this.pageColors(state, part.pageIndex);
+    const translatedText = ["cached", "translated"].includes(translation?.status)
+      ? String(translation.translatedText || "") : "";
+    const root = doc.createElement("div");
+    root.className = "reader-selection-replacer-test-part merged-translation";
+    root.dataset.paragraphIndex = String(paragraphIndex);
+    root.dataset.partIndex = String(partIndex);
+    root.dataset.segmentID = String(segment?.id || "");
+    root.dataset.translationStatus = String(translation?.status
+      || (state.translationPending ? "pending" : "missing"));
+    root.dataset.translationError = String(translation?.errorCode || "");
+    root.title = `选区段落 ${label}：${String(paragraph.selectedText || paragraph.sourceText || "")
+      .replace(/\s+/gu, " ").trim().slice(0, 240)}`;
+    this.style(root, {
+      position: "absolute", boxSizing: "border-box",
+      left: `${Math.max(0, left)}px`, top: `${Math.max(0, top)}px`,
+      width: `${width}px`, height: `${height}px`, overflow: "hidden",
+      border: `1px solid ${accent}`, background: colors.background,
+      pointerEvents: "none"
+    });
+    const textNode = doc.createElement("div");
+    textNode.className = "reader-selection-replacer-translation-text";
+    this.style(textNode, {
+      position: "absolute", top: "0", left: "0", right: "0",
+      boxSizing: "border-box", padding: "3px 4px", overflow: "hidden",
+      whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word",
+      color: colors.foreground,
+      fontFamily: '"Noto Sans CJK SC", "Microsoft YaHei", sans-serif',
+      fontWeight: "400", textAlign: "left", display: "block",
+      pointerEvents: "none"
+    });
+    root.append(textNode);
+    let fitted;
+    if (state.translationPending && !translation) {
+      fitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
+    }
+    else if (!translatedText) {
+      const message = translation?.status === "skipped" ? "段落未翻译" : "段落翻译失败";
+      fitted = this.renderTranslationStatus(textNode, "selection", message,
+        translation?.errorCode || "missing-translation");
+    }
+    else {
+      fitted = this.fitAbstractText({ node: textNode, containerWidth: width,
+        containerHeight: height, sourceRects: part.sourceRects, translatedText });
+      if (!fitted.rendered) {
+        const layoutFailure = fitted;
+        const status = this.renderTranslationStatus(textNode, "selection",
+          "段落无法排版", layoutFailure.failureReason);
+        fitted = { ...status, ...layoutFailure, rendered: true,
+          layoutMode: status.layoutMode, failureReason: layoutFailure.failureReason };
+      }
+    }
+    if (partIndex === 0) {
+      const badge = doc.createElement("span");
+      badge.className = "reader-selection-replacer-test-paragraph-badge";
+      badge.textContent = label;
+      this.style(badge, {
+        position: "absolute", left: "0", top: "0", zIndex: "3", padding: "0 2px",
+        color: "#ffffff", background: accent, font: "9px/12px sans-serif",
+        whiteSpace: "nowrap", pointerEvents: "none"
+      });
+      root.append(badge);
+    }
+    layer.append(root);
+    return { ...fitted, node: root };
+  },
+
   translationDecoration(kind, status) {
     if (kind === "title") {
       return { border: "none", showBadge: false, badgeText: "" };
@@ -2378,6 +2499,7 @@ var SelectionReplacerOverlay = {
 var SelectionReplacerTest = {
   toolbarStatus: new Map(),
   autoSessions: new Map(),
+  selectionSessions: new Map(),
   startingReaders: new Set(),
 
   async init(rootURI) {
@@ -2416,6 +2538,8 @@ var SelectionReplacerTest = {
       SelectionReplacerOverlay.remove(reader);
     }
     this.autoSessions.clear();
+    for (const session of this.selectionSessions.values()) session.cancelled = true;
+    this.selectionSessions.clear();
     this.startingReaders.clear();
     this.toolbarStatus.clear();
     SegmentTranslationCache.close().catch(error => Zotero.logError?.(error));
@@ -2438,7 +2562,7 @@ var SelectionReplacerTest = {
     const accepted = Services.prompt.promptPassword(
       Zotero.getMainWindow?.(),
       existing ? "更换 DeepSeek API Key" : "配置 DeepSeek API Key",
-      "论文标题和摘要会发送到 DeepSeek，并可能产生 API 费用。密钥仅保存在 Zotero 本机登录管理器中。",
+       "论文标题、摘要和用户主动划选的段落会发送到 DeepSeek，并可能产生 API 费用。密钥仅保存在 Zotero 本机登录管理器中。",
       input, null, {}
     );
     if (!accepted) return false;
@@ -2618,7 +2742,7 @@ var SelectionReplacerTest = {
       + (unclassified ? ` · 未分类字符：${unclassified}` : "");
   },
 
-  async replaceSelection(reader, annotation, sourceText, replacement, status, button) {
+  async translateSelection(reader, annotation, sourceText, status, button) {
     const position = copyPosition(annotation?.position)
       || copyPosition(reader?._internalReader?.getSelectionPosition?.());
     const view = reader?._internalReader?._primaryView || null;
@@ -2632,6 +2756,10 @@ var SelectionReplacerTest = {
     }
     status.textContent = "正在读取字符和段落…";
     button.disabled = true;
+    const session = { reader, cancelled: false };
+    const previous = this.selectionSessions.get(reader);
+    if (previous) previous.cancelled = true;
+    this.selectionSessions.set(reader, session);
     try {
       let match;
       try {
@@ -2656,30 +2784,62 @@ var SelectionReplacerTest = {
       }
       if (match.fallback || !match.paragraphs.length) {
         match = makeFallbackMatch(position);
-        status.textContent = "无法识别正文段落，已退回原始矩形覆盖";
+        status.textContent = "无法识别正文段落";
       }
       else {
         status.textContent = this.formatDiagnostics(match.diagnostics);
       }
-      SelectionReplacerOverlay.attach(reader, view, match, {
-        mode: "replacement",
-        replacement
-      });
       match.segments = ContentSegments.fromSelection(match);
+      session.view = view;
+      session.match = match;
+      session.segments = match.segments;
+      session.attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
+      if (this.selectionSessions.get(reader) !== session || session.cancelled) return;
+      if (!match.segments.length) {
+        status.textContent = "未找到可翻译的英文段落";
+        return;
+      }
+      SelectionReplacerOverlay.attach(reader, view, match, {
+        mode: "selection-translation",
+        segments: match.segments,
+        translations: new Map(),
+        translationPending: true
+      });
+      status.textContent = `正在翻译 ${match.segments.length} 个段落…`;
+      const translation = await TranslationCoordinator.translateSegments({
+        attachment: session.attachment,
+        segments: match.segments,
+        session,
+        bypassCache: false
+      });
+      if (this.selectionSessions.get(reader) !== session || session.cancelled) return;
+      session.translation = translation;
+      SelectionReplacerOverlay.attach(reader, view, match, {
+        mode: "selection-translation",
+        segments: match.segments,
+        translations: translation.results,
+        translationPending: false
+      });
+      const translated = translation.diagnostics.translated + translation.diagnostics.cached;
+      status.textContent = `段落翻译完成：${translated}/${match.segments.length}`
+        + (translation.diagnostics.failed ? ` · 失败 ${translation.diagnostics.failed}` : "")
+        + (translation.diagnostics.skipped ? ` · 跳过 ${translation.diagnostics.skipped}` : "");
       Zotero.debug?.(`[${PLUGIN_ID}] selection analysis: ${JSON.stringify({
         sourceText,
-        replacement,
         diagnostics: match.diagnostics,
+        translation: translation.diagnostics,
         paragraphs: match.paragraphs.map(paragraph => ({
           sourceIndex: paragraph.sourceIndex,
           matchType: paragraph.matchType,
           confidence: paragraph.confidence,
-          selectedRectCount: paragraph.selectedRectCount
+          selectedRectCount: paragraph.selectedRectCount,
+          selectedText: paragraph.selectedText || paragraph.sourceText || ""
         }))
       })}`);
     }
     finally {
       button.disabled = false;
+      if (this.selectionSessions.get(reader) === session) this.selectionSessions.delete(reader);
     }
   },
 
@@ -2695,25 +2855,18 @@ var SelectionReplacerTest = {
     container.style.alignItems = "center";
     container.style.gap = "4px";
 
-    const input = doc.createElement("input");
-    input.type = "text";
-    input.value = DEFAULT_REPLACEMENT;
-    input.title = "输入覆盖选区的测试文字";
-    input.setAttribute("aria-label", "测试替换文字");
-    input.style.width = "92px";
-
     const button = doc.createElement("button");
     button.type = "button";
-    button.textContent = "测试替换";
-    button.title = "用输入框中的测试文字覆盖当前选区";
+    button.textContent = "翻译";
+    button.title = "翻译当前选区中识别到的段落";
+    button.setAttribute("aria-label", button.title);
 
     const status = doc.createElement("span");
     status.style.fontSize = "11px";
     status.style.opacity = "0.75";
 
     button.addEventListener("click", () => {
-      const replacement = String(input.value || DEFAULT_REPLACEMENT).trim();
-      this.replaceSelection(reader, annotation, sourceText, replacement, status, button)
+      this.translateSelection(reader, annotation, sourceText, status, button)
         .catch(error => {
           Zotero.logError?.(error);
           status.textContent = `处理失败：${error?.message || error}`;
@@ -2721,7 +2874,7 @@ var SelectionReplacerTest = {
         });
     });
 
-    container.append(input, button, status);
+    container.append(button, status);
     append(container);
   }
 };

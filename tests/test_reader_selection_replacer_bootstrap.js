@@ -192,6 +192,7 @@ function makeCrossPageFixture() {
   assert.strictEqual(match.diagnostics.fullParagraphCount, 0);
   assert.strictEqual(match.diagnostics.partialParagraphCount, 1);
   assert.strictEqual(match.paragraphs[0].matchType, "partial");
+  assert.strictEqual(match.paragraphs[0].selectedText, "ABCD ABCD");
 }
 
 {
@@ -450,6 +451,39 @@ assert.strictEqual(
   assert.strictEqual(titleFailure.border, "none");
   assert.strictEqual(titleFailure.showBadge, false);
   assert.strictEqual(titleFailure.badgeText, "");
+}
+
+{
+  const makeElement = tagName => ({
+    tagName: tagName.toUpperCase(),
+    children: [],
+    style: {},
+    textContent: "",
+    isConnected: true,
+    append(...children) { this.children.push(...children); },
+    setAttribute(name, value) { this[name] = value; },
+    addEventListener(name, handler) { this[`on${name}`] = handler; }
+  });
+  const created = [];
+  const doc = { createElement(tagName) {
+    const element = makeElement(tagName);
+    created.push(element);
+    return element;
+  } };
+  const appended = [];
+  replacerTest.onRenderTextSelectionPopup({
+    reader: {}, doc,
+    params: { annotation: { text: "Selected paragraph", position: {
+      pageIndex: 0, rects: [[0, 0, 10, 10]],
+      fragments: [{ pageIndex: 0, rects: [[0, 0, 10, 10]] }]
+    } } },
+    append(element) { appended.push(element); }
+  });
+  assert.strictEqual(appended.length, 1);
+  assert.strictEqual(created.some(element => element.tagName === "INPUT"), false);
+  assert.strictEqual(appended[0].children.length, 2);
+  assert.strictEqual(appended[0].children[0].textContent, "翻译");
+  assert.match(appended[0].children[0].title, /翻译/u);
 }
 
 console.log("selection replacer bootstrap tests passed");

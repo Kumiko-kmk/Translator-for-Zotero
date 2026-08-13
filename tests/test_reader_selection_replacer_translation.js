@@ -37,10 +37,17 @@ const segments = context.ContentSegments.fromTargets([
 ]);
 assert.strictEqual(segments[0].sourceLanguage, "en");
 assert.strictEqual(segments[1].sourceLanguage, "zh-CN");
-assert.strictEqual(context.ContentSegments.fromSelection({ paragraphs: [{
-  sourceText: "Selected custom prose", selectedCharIDs: ["c3"],
+const selectionSegments = context.ContentSegments.fromSelection({ paragraphs: [{
+  sourceText: "Full paragraph prose", selectedText: "Selected custom prose", selectedCharIDs: ["c3"],
   selectedPosition: position, matchType: "partial", confidence: "high"
-}] })[0].kind, "custom");
+}, {
+  sourceText: "Unclassified low confidence prose", selectedText: "Unclassified low confidence prose",
+  selectedCharIDs: ["c4"], selectedPosition: position, matchType: "unclassified", confidence: "low"
+}] });
+assert.strictEqual(selectionSegments[0].kind, "custom");
+assert.strictEqual(selectionSegments[0].sourceText, "Selected custom prose");
+assert.strictEqual(selectionSegments[1].kind, "unclassified");
+assert.strictEqual(selectionSegments[1].sourceLanguage, "en");
 
 const parsed = context.DeepSeekTranslationClient.parse(
   '```json\n{"translations":[{"id":"title","zh":"可靠的科学标题"}]}\n```');
@@ -66,6 +73,13 @@ assert.throws(() => context.DeepSeekTranslationClient.validate([
 ], { translations: [{ id: "abstract", zh: "摘要正文<br>不得换行" }] }), /摘要译文/u);
 assert.throws(() => context.DeepSeekTranslationClient.validate([segments[0]],
   { translations: [{ id: "unexpected", zh: "错误" }] }));
+assert.strictEqual(context.DeepSeekTranslationClient.validate([selectionSegments[0]], {
+  translations: [{ id: "p-0", zh: "选中的自定义段落" }]
+}).get("p-0"), "选中的自定义段落");
+assert.throws(() => context.DeepSeekTranslationClient.validate([selectionSegments[0]], {
+  translations: [{ id: "p-0", zh: "自定义段落<br>不允许换行" }]
+}), /自定义段落译文/u);
+assert.match(context.DeepSeekTranslationClient.prompt(false, selectionSegments), /自定义段落译文/u);
 
 (async () => {
   const originalGet = context.SegmentTranslationCache.get;
@@ -88,6 +102,22 @@ assert.throws(() => context.DeepSeekTranslationClient.validate([segments[0]],
   assert.strictEqual(result.results.get("title").status, "cached");
   assert.strictEqual(result.results.get("abstract").status, "translated");
   assert.strictEqual(calls, 1);
+
+  context.SegmentTranslationCache.get = async (_attachment, segment) => null;
+  context.DeepSeekTranslationClient.translate = async (_key, batch) => {
+    calls++;
+    return new Map(batch.map(segment => [segment.id, `译文-${segment.id}`]));
+  };
+  const selectionResult = await context.TranslationCoordinator.translateSegments({
+    attachment: { libraryID: 1, key: "ATT" },
+    segments: selectionSegments
+  });
+  assert.strictEqual(selectionResult.results.get("p-0").status, "translated");
+  assert.strictEqual(selectionResult.results.get("u-1").status, "translated");
+  assert.strictEqual(selectionResult.diagnostics.translated, 2);
+  assert.strictEqual(calls, 3);
+  assert.strictEqual(context.SegmentTranslationCache.promptVersion(selectionSegments[0]),
+    "selection-translation-v1");
 
   context.SegmentTranslationCache.get = originalGet;
   context.SegmentTranslationCache.put = originalPut;
