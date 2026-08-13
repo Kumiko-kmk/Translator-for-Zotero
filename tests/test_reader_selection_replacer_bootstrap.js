@@ -325,12 +325,14 @@ assert.strictEqual(
   const fitted = overlay.fitSelectionText({ node,
     containerWidth: 200, containerHeight: 50,
     translatedText: "选区段落译文自动换行",
-    sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27]] });
+    sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27]],
+    indentFirstBlock: true });
   assert.strictEqual(fitted.rendered, true);
   assert.strictEqual(fitted.layoutMode, "selection-fit");
   assert.strictEqual(node.style.textAlign, "left");
   assert.strictEqual(node.style.whiteSpace, "pre-wrap");
   assert.strictEqual(node.style.overflowWrap, "break-word");
+  assert.strictEqual(node.textContent, "　　选区段落译文自动换行");
 }
 
 {
@@ -364,7 +366,8 @@ assert.strictEqual(
   };
   const fitted = overlay.fitAbstractText({ node,
     containerWidth: 200, containerHeight: 100, translatedText: "摘要译文连续文本",
-    sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27], [0, 30, 200, 42]] });
+    sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27], [0, 30, 200, 42]],
+    indentFirstBlock: true });
   assert.strictEqual(fitted.rendered, true);
   assert.strictEqual(fitted.layoutMode, "abstract-fit");
   assert.ok(fitted.fontSize > 12 * 1.45);
@@ -373,6 +376,55 @@ assert.strictEqual(
   assert.strictEqual(node.style.display, "block");
   assert.strictEqual(node.style.wordBreak, "normal");
   assert.strictEqual(node.style.overflowWrap, "break-word");
+  assert.strictEqual(node.textContent, "　　摘要译文连续文本");
+}
+
+{
+  const node = {
+    isConnected: true,
+    style: {},
+    scrollWidth: 180,
+    scrollHeight: 32
+  };
+  const fitted = overlay.fitSelectionText({ node,
+    containerWidth: 200, containerHeight: 50,
+    translatedText: "后续栏位译文",
+    sourceRects: [[0, 0, 200, 12]],
+    indentFirstBlock: false });
+  assert.strictEqual(fitted.rendered, true);
+  assert.strictEqual(node.textContent, "后续栏位译文");
+}
+
+{
+  const node = { style: {}, textContent: "" };
+  const status = overlay.renderTranslationStatus(node, "selection", "正在翻译…", "pending");
+  assert.strictEqual(status.rendered, true);
+  assert.strictEqual(node.textContent, "正在翻译…");
+  assert.strictEqual(node.textContent.startsWith("　　"), false);
+}
+
+{
+  const reader = {};
+  const view = { _iframeWindow: {} };
+  const first = overlay.attach(reader, view, [{ kind: "title" }], {
+    mode: "diagnostic", recordID: "front-matter", translations: new Map()
+  });
+  const selection = overlay.attach(reader, view, { paragraphs: [] }, {
+    mode: "selection-translation", recordID: "selection-test-1",
+    segments: [], translations: new Map(), translationPending: false
+  });
+  assert.strictEqual(first, selection);
+  assert.deepStrictEqual(Array.from(selection.records.keys()), [
+    "front-matter", "selection-test-1"
+  ]);
+  overlay.attach(reader, view, [{ kind: "title" }], {
+    mode: "diagnostic", recordID: "front-matter", translations: new Map()
+  });
+  assert.deepStrictEqual(Array.from(selection.records.keys()), [
+    "front-matter", "selection-test-1"
+  ]);
+  overlay.remove(reader);
+  assert.strictEqual(overlay.states.has(reader), false);
 }
 
 {

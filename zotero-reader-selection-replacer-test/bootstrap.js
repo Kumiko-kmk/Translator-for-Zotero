@@ -1,11 +1,12 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.10";
+const PLUGIN_VERSION = "0.4.11";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
 const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
 const LAYER_CLASS = "reader-selection-replacer-test-layer";
+const PARAGRAPH_TRANSLATION_INDENT = "　　";
 const PARAGRAPH_MARK_COLORS = [
   "#0ea5e9", "#f97316", "#22c55e", "#a855f7", "#eab308", "#ec4899"
 ];
@@ -1660,40 +1661,64 @@ var SelectionReplacerOverlay = {
   states: new Map(),
 
   attach(reader, view, data, options = {}) {
-    this.remove(reader);
-    const state = {
-      reader,
-      view,
-      mode: options.mode || "replacement",
+    let state = this.states.get(reader);
+    if (!state || state.cancelled) {
+      state = {
+        reader,
+        view,
+        records: new Map(),
+        nextSequence: 0,
+        cancelled: false,
+        overlayLayers: new Map(),
+        eventHandlers: [],
+        renderTimer: null,
+        settleTimer: null,
+        poller: null
+      };
+      this.states.set(reader, state);
+      this.removeExistingLayers(view);
+      this.bindEvents(state);
+      state.poller = setInterval(() => {
+        if (state.cancelled) return;
+        if (Array.isArray(Zotero.Reader?._readers)
+          && !Zotero.Reader._readers.includes(state.reader)) {
+          this.remove(state.reader);
+          SelectionReplacerTest.autoSessions?.delete(state.reader);
+          SelectionReplacerTest.selectionSessions?.delete(state.reader);
+          SelectionReplacerTest.toolbarStatus?.delete(state.reader);
+          return;
+        }
+        this.schedule(state, 0);
+      }, 1200);
+    }
+    state.view = view || state.view;
+    const mode = options.mode || "replacement";
+    const recordID = String(options.recordID ||
+      (mode === "diagnostic" ? "front-matter" : mode === "selection-translation"
+        ? `selection-${state.nextSequence + 1}` : "replacement"));
+    const previous = state.records.get(recordID);
+    state.records.set(recordID, {
+      recordID,
+      mode,
+      data,
       match: data?.paragraphs ? data : null,
       targets: Array.isArray(data) ? data : [],
       segments: options.segments || [],
       translations: options.translations || new Map(),
       translationPending: Boolean(options.translationPending),
       replacement: String(options.replacement || ""),
-      cancelled: false,
-      overlayLayers: new Map(),
-      eventHandlers: [],
-      renderTimer: null,
-      settleTimer: null,
-      poller: null
-    };
-    this.states.set(reader, state);
-    this.removeExistingLayers(view);
-    this.bindEvents(state);
-    state.poller = setInterval(() => {
-      if (state.cancelled) return;
-      if (Array.isArray(Zotero.Reader?._readers)
-        && !Zotero.Reader._readers.includes(state.reader)) {
-        this.remove(state.reader);
-        SelectionReplacerTest.autoSessions?.delete(state.reader);
-        SelectionReplacerTest.toolbarStatus?.delete(state.reader);
-        return;
-      }
-      this.schedule(state, 0);
-    }, 1200);
+      sequence: previous?.sequence ?? state.nextSequence++
+    });
     this.schedule(state, 0);
     return state;
+  },
+
+  removeRecord(reader, recordID) {
+    const state = this.states.get(reader);
+    if (!state || !recordID) return false;
+    const removed = state.records.delete(String(recordID));
+    if (removed) this.schedule(state, 0);
+    return removed;
   },
 
   bindEvents(state) {
@@ -1826,44 +1851,47 @@ var SelectionReplacerOverlay = {
   render(state) {
     if (state.cancelled || !state.view) return;
     for (const layer of state.overlayLayers.values()) layer.replaceChildren();
-    if (state.mode === "diagnostic") {
-      this.renderTargets(state);
-      return;
-    }
-    if (state.mode === "selection-translation") {
-      this.renderSelectionTranslations(state);
-      return;
-    }
-    const paragraphs = state.match?.paragraphs || [];
-    const displayCounts = { paragraph: 0, unclassified: 0 };
-    paragraphs.forEach((paragraph, paragraphIndex) => {
-      const displayKind = paragraph.matchType === "unclassified" ? "unclassified" : "paragraph";
-      const displayIndex = displayCounts[displayKind]++;
-      const parts = [];
-      for (const fragment of positionFragments(paragraph.selectedPosition)) {
-        const lineCounts = fragment.lineCharCounts || [];
-        for (let index = 0; index < fragment.rects.length; index++) {
-          const rect = this.convertRect(state, fragment.rects[index], fragment.pageIndex);
-          if (rect) {
-            parts.push({
-              pageIndex: Number(fragment.pageIndex || 0),
-              rect,
-              sourceCharCount: Number(lineCounts[index] || 0)
-            });
+    for (const record of [...state.records.values()].sort((left, right) =>
+      left.sequence - right.sequence)) {
+      if (record.mode === "diagnostic") {
+        this.renderTargets(state, record);
+        continue;
+      }
+      if (record.mode === "selection-translation") {
+        this.renderSelectionTranslations(state, record);
+        continue;
+      }
+      const paragraphs = record.match?.paragraphs || [];
+      const displayCounts = { paragraph: 0, unclassified: 0 };
+      paragraphs.forEach((paragraph, paragraphIndex) => {
+        const displayKind = paragraph.matchType === "unclassified" ? "unclassified" : "paragraph";
+        const displayIndex = displayCounts[displayKind]++;
+        const parts = [];
+        for (const fragment of positionFragments(paragraph.selectedPosition)) {
+          const lineCounts = fragment.lineCharCounts || [];
+          for (let index = 0; index < fragment.rects.length; index++) {
+            const rect = this.convertRect(state, fragment.rects[index], fragment.pageIndex);
+            if (rect) {
+              parts.push({
+                pageIndex: Number(fragment.pageIndex || 0),
+                rect,
+                sourceCharCount: Number(lineCounts[index] || 0)
+              });
+            }
           }
         }
-      }
-      if (!parts.length) return;
-      const chunks = splitReplacement(state.replacement, parts);
-      parts.forEach((part, partIndex) => {
-        this.renderPart(state, part, chunks[partIndex] || "", paragraph, paragraphIndex,
-          partIndex, displayIndex);
+        if (!parts.length) return;
+        const chunks = splitReplacement(record.replacement, parts);
+        parts.forEach((part, partIndex) => {
+          this.renderPart(state, part, chunks[partIndex] || "", paragraph, paragraphIndex,
+            partIndex, displayIndex);
+        });
       });
-    });
+    }
   },
 
-  renderTargets(state) {
-    for (const [targetIndex, target] of (state.targets || []).entries()) {
+  renderTargets(state, record) {
+    for (const [targetIndex, target] of (record.targets || []).entries()) {
       const parts = [];
       for (const fragment of positionFragments(target.position)) {
         for (const rect of fragment.rects || []) {
@@ -1872,7 +1900,7 @@ var SelectionReplacerOverlay = {
             sourceCharCount: Math.max(1, Math.round((converted[2] - converted[0]) / 8)) });
         }
       }
-      const translation = state.translations?.get?.(target.kind);
+      const translation = record.translations?.get?.(target.kind);
       const translatedText = ["cached", "translated"].includes(translation?.status)
         ? translation.translatedText : "";
       if (["title", "abstract"].includes(target.kind)) {
@@ -1880,8 +1908,8 @@ var SelectionReplacerOverlay = {
           ? this.mergeTitleParts(parts) : this.mergeTargetParts(parts);
         const results = merged.map((part, partIndex) => this.renderTranslatedTarget(
           state, part, target, targetIndex, partIndex, translatedText, translation));
-        state.targetLayoutResults ||= new Map();
-        state.targetLayoutResults.set(target.kind, results);
+        record.targetLayoutResults ||= new Map();
+        record.targetLayoutResults.set(target.kind, results);
         if (results.length) continue;
       }
       parts.forEach((part, partIndex) => this.renderTargetPart(state, part, target,
@@ -1889,16 +1917,16 @@ var SelectionReplacerOverlay = {
     }
   },
 
-  renderSelectionTranslations(state) {
-    const paragraphs = state.match?.paragraphs || [];
+  renderSelectionTranslations(state, record) {
+    const paragraphs = record.match?.paragraphs || [];
     const displayCounts = { paragraph: 0, unclassified: 0 };
     paragraphs.forEach((paragraph, paragraphIndex) => {
       const unclassified = paragraph.matchType === "unclassified";
       const displayKind = unclassified ? "unclassified" : "paragraph";
       const displayIndex = displayCounts[displayKind]++;
-      const segment = (state.segments || []).find(value =>
+      const segment = (record.segments || []).find(value =>
         Number(value?.metadata?.selectionParagraphIndex) === paragraphIndex) || null;
-      const translation = segment ? state.translations?.get?.(segment.id) : null;
+      const translation = segment ? record.translations?.get?.(segment.id) : null;
       const parts = [];
       for (const fragment of positionFragments(paragraph.selectedPosition)) {
         const lineCounts = fragment.lineCharCounts || [];
@@ -1922,9 +1950,9 @@ var SelectionReplacerOverlay = {
         : merged.map(() => "");
       const results = merged.map((part, partIndex) => this.renderTranslatedSelectionTarget(
         state, part, paragraph, segment, paragraphIndex, partIndex, displayIndex,
-        translation, chunks[partIndex] || ""));
-      state.selectionLayoutResults ||= new Map();
-      if (segment) state.selectionLayoutResults.set(segment.id, results);
+        translation, chunks[partIndex] || "", record));
+      record.selectionLayoutResults ||= new Map();
+      if (segment) record.selectionLayoutResults.set(segment.id, results);
     });
   },
 
@@ -2258,14 +2286,17 @@ var SelectionReplacerOverlay = {
       sourceRectCount: heights.length, mergedRectCount: 1, failureReason: "" };
   },
 
-  fitAbstractText({ node, containerWidth, containerHeight, sourceRects, translatedText }) {
+  fitAbstractText({ node, containerWidth, containerHeight, sourceRects, translatedText,
+    indentFirstBlock = false }) {
     const heights = (sourceRects || []).map(rect => Math.max(1, rect[3] - rect[1]))
       .sort((left, right) => left - right);
     const medianHeight = heights[Math.floor(heights.length / 2)] || containerHeight;
     const minimum = Math.max(8, Math.min(40, medianHeight * 0.78));
     const maximum = Math.max(minimum, Math.min(40, medianHeight * 2.10));
     const availableHeight = Math.max(1, containerHeight - 6);
-    node.textContent = String(translatedText || "").trim();
+    const text = String(translatedText || "").trim();
+    node.textContent = indentFirstBlock && text
+      ? `${PARAGRAPH_TRANSLATION_INDENT}${text}` : text;
     node.style.whiteSpace = "pre-wrap";
     node.style.overflowWrap = "break-word";
     node.style.wordBreak = "normal";
@@ -2320,14 +2351,17 @@ var SelectionReplacerOverlay = {
     };
   },
 
-  fitSelectionText({ node, containerWidth, containerHeight, sourceRects, translatedText }) {
+  fitSelectionText({ node, containerWidth, containerHeight, sourceRects, translatedText,
+    indentFirstBlock = false }) {
     const heights = (sourceRects || []).map(rect => Math.max(1, rect[3] - rect[1]))
       .sort((left, right) => left - right);
     const medianHeight = heights[Math.floor(heights.length / 2)] || 12;
     const minimum = Math.max(5, Math.min(14, medianHeight * 0.42));
     const maximum = Math.max(minimum, Math.min(28, medianHeight * 1.08));
     const availableHeight = Math.max(1, containerHeight - 6);
-    node.textContent = String(translatedText || "");
+    const text = String(translatedText || "");
+    node.textContent = indentFirstBlock && text
+      ? `${PARAGRAPH_TRANSLATION_INDENT}${text}` : text;
     this.style(node, {
       position: "absolute", top: "0", left: "0", width: "100%", height: "100%",
       boxSizing: "border-box", padding: "3px 4px", margin: "0", overflow: "hidden",
@@ -2444,7 +2478,8 @@ var SelectionReplacerOverlay = {
     }
     else if (target.kind === "abstract") {
       fitted = this.fitAbstractText({ node: textNode, containerWidth: width,
-        containerHeight: height, sourceRects: part.sourceRects, translatedText });
+        containerHeight: height, sourceRects: part.sourceRects, translatedText,
+        indentFirstBlock: partIndex === 0 });
       if (!fitted.rendered) {
         const layoutFailure = fitted;
         const status = this.renderTranslationStatus(textNode, target.kind,
@@ -2473,7 +2508,7 @@ var SelectionReplacerOverlay = {
   },
 
   renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
-    partIndex, displayIndex, translation = null, translatedChunk = "") {
+    partIndex, displayIndex, translation = null, translatedChunk = "", record = null) {
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2495,7 +2530,7 @@ var SelectionReplacerOverlay = {
     root.dataset.partIndex = String(partIndex);
     root.dataset.segmentID = String(segment?.id || "");
     root.dataset.translationStatus = String(translation?.status
-      || (state.translationPending ? "pending" : "missing"));
+      || (record?.translationPending ? "pending" : "missing"));
     root.dataset.translationError = String(translation?.errorCode || "");
     root.title = `选区段落 ${label}：${String(paragraph.selectedText || paragraph.sourceText || "")
       .replace(/\s+/gu, " ").trim().slice(0, 240)}`;
@@ -2520,7 +2555,7 @@ var SelectionReplacerOverlay = {
     root.append(textNode);
     layer.append(root);
     let fitted;
-    if (state.translationPending && !translation) {
+    if (record?.translationPending && !translation) {
       fitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
     }
     else if (!translationSucceeded) {
@@ -2536,7 +2571,8 @@ var SelectionReplacerOverlay = {
     }
     else {
       fitted = this.fitSelectionText({ node: textNode, containerWidth: width,
-        containerHeight: height, sourceRects: part.sourceRects, translatedText });
+        containerHeight: height, sourceRects: part.sourceRects, translatedText,
+        indentFirstBlock: partIndex === 0 });
       if (!fitted.rendered) {
         const layoutFailure = fitted;
         const status = this.renderTranslationStatus(textNode, "selection",
@@ -2727,6 +2763,7 @@ var SelectionReplacerTest = {
   toolbarStatus: new Map(),
   autoSessions: new Map(),
   selectionSessions: new Map(),
+  selectionTaskCounter: 0,
   startingReaders: new Set(),
 
   async init(rootURI) {
@@ -2893,8 +2930,10 @@ var SelectionReplacerTest = {
     }
     if (this.startingReaders.has(reader)) return null;
     if (force) {
+      const previous = this.autoSessions.get(reader);
+      if (previous) previous.cancelled = true;
       this.autoSessions.delete(reader);
-      SelectionReplacerOverlay.remove(reader);
+      SelectionReplacerOverlay.removeRecord(reader, "front-matter");
     }
     this.startingReaders.add(reader);
     if (button) button.disabled = true;
@@ -2909,7 +2948,8 @@ var SelectionReplacerTest = {
       this.autoSessions.set(reader, session);
       if (result.targets.length) {
         SelectionReplacerOverlay.attach(reader, view, result.targets,
-          { mode: "diagnostic", segments, translations: new Map() });
+          { mode: "diagnostic", recordID: "front-matter", segments,
+            translations: new Map() });
       }
       this.setToolbarStatus(reader, this.formatAutoStatusV2(result));
       const translation = await TranslationCoordinator.translateSegments({
@@ -2918,7 +2958,8 @@ var SelectionReplacerTest = {
       session.translation = translation;
       if (!session.cancelled && result.targets.length) {
         SelectionReplacerOverlay.attach(reader, view, result.targets, {
-          mode: "diagnostic", segments, translations: translation.results
+          mode: "diagnostic", recordID: "front-matter", segments,
+          translations: translation.results
         });
       }
       const translated = translation.diagnostics.translated + translation.diagnostics.cached;
@@ -2983,9 +3024,17 @@ var SelectionReplacerTest = {
     }
     status.textContent = "正在读取字符和段落…";
     button.disabled = true;
-    const session = { reader, cancelled: false };
     const previous = this.selectionSessions.get(reader);
     if (previous) previous.cancelled = true;
+    if (previous?.recordID) {
+      const previousState = SelectionReplacerOverlay.states.get(reader);
+      const previousRecord = previousState?.records?.get(previous.recordID);
+      if (previousRecord?.translationPending) {
+        SelectionReplacerOverlay.removeRecord(reader, previous.recordID);
+      }
+    }
+    const session = { reader, cancelled: false,
+      recordID: `selection-${++this.selectionTaskCounter}` };
     this.selectionSessions.set(reader, session);
     try {
       let match;
@@ -3028,6 +3077,7 @@ var SelectionReplacerTest = {
       }
       SelectionReplacerOverlay.attach(reader, view, match, {
         mode: "selection-translation",
+        recordID: session.recordID,
         segments: match.segments,
         translations: new Map(),
         translationPending: true
@@ -3043,6 +3093,7 @@ var SelectionReplacerTest = {
       session.translation = translation;
       SelectionReplacerOverlay.attach(reader, view, match, {
         mode: "selection-translation",
+        recordID: session.recordID,
         segments: match.segments,
         translations: translation.results,
         translationPending: false
