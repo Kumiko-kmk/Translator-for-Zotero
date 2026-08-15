@@ -1,12 +1,12 @@
 param(
-[string]$Version = "0.4.13"
+    [string]$Version = "1.0.0"
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $sourceDir = Join-Path $projectRoot "zotero-reader-selection-replacer-test"
 $distDir = Join-Path $projectRoot "dist"
-$outputPath = Join-Path $distDir "reader-selection-replacer-test-$Version.xpi"
+$outputPath = Join-Path $distDir "Translator-for-Zotero-$Version.xpi"
 
 if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
     throw "Selection replacer test source directory not found: $sourceDir"
@@ -24,7 +24,21 @@ $archive = [System.IO.Compression.ZipFile]::Open(
     [System.IO.Compression.ZipArchiveMode]::Create
 )
 try {
-    foreach ($name in @("manifest.json", "README.md", "bootstrap.js", "page-data-body-extractor.js", "content-segments.js", "translation-service.js")) {
+    foreach ($name in @(
+        "manifest.json",
+        "README.md",
+        "bootstrap.js",
+        "page-data-body-extractor.js",
+        "content-segments.js",
+        "translation-service.js",
+       "icons/paper-assistant-16.svg",
+       "icons/paper-assistant-20.svg",
+        "icons/translator-for-zotero-16.svg",
+        "icons/translator-for-zotero-20.svg",
+       "icons/translator-for-zotero.png",
+        "locale/en-US/reader-selection-replacer-test.ftl",
+        "locale/zh-CN/reader-selection-replacer-test.ftl"
+    )) {
         $path = Join-Path $sourceDir $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Selection replacer test package file not found: $path"

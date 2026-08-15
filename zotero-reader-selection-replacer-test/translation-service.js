@@ -1,10 +1,19 @@
 "use strict";
 
-const DEEPSEEK_ORIGIN = "chrome://paper-assistant-front-matter";
-const DEEPSEEK_REALM = "DeepSeek API";
-const DEEPSEEK_USERNAME = "default";
+const PROVIDER_CREDENTIALS_ORIGIN = "chrome://paper-assistant-provider-settings";
+const PROVIDER_CREDENTIALS_USERNAME = "default";
+const DEEPSEEK_REALM = "Paper Assistant DeepSeek API";
+const QWEN_MT_REALM = "Paper Assistant Qwen API";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEEPSEEK_MODEL = "deepseek-v4-flash";
+const DEEPSEEK_PROVIDER = "deepseek";
+const QWEN_MT_PROVIDER = "qwen-mt";
+const QWEN_MT_PLUS_MODEL = "qwen-mt-plus";
+const ACTIVE_TRANSLATION_PROVIDER_PREF =
+  "extensions.reader-selection-replacer.activeTranslationProvider";
+// Qwen-MT uses the Beijing shared OpenAI-compatible endpoint. Keep this
+// internal so users only need to provide the API key in the side pane.
+const QWEN_MT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const TRANSLATION_PROMPT_VERSION = "front-matter-translation-v2-title-break";
 const SELECTION_TRANSLATION_PROMPT_VERSION = "selection-translation-v1";
 const TITLE_BREAK_MARKER = "<br>";
@@ -12,6 +21,40 @@ const TRANSLATION_CACHE_FILE = "paper-assistant-segment-translations.sqlite";
 const API_KEY_PROMPTED_PREF = "extensions.reader-selection-replacer.apiKeyPrompted";
 const NETWORK_RETRY_DELAYS = [1000, 3000, 8000];
 const CONTENT_RETRY_DELAYS = [500, 1500];
+const QWEN_MT_LANGUAGE_NAMES = Object.freeze({
+  auto: "auto",
+  en: "English",
+  "en-US": "English",
+  "en-GB": "English",
+  zh: "Chinese",
+  "zh-CN": "Chinese",
+  "zh-TW": "Chinese",
+  ja: "Japanese",
+  ko: "Korean",
+  fr: "French",
+  de: "German",
+  es: "Spanish",
+  pt: "Portuguese",
+  "pt-BR": "Portuguese",
+  ru: "Russian",
+  ar: "Arabic",
+  th: "Thai",
+  id: "Indonesian",
+  vi: "Vietnamese"
+});
+
+var TranslationModelRegistry = Object.freeze({
+  deepseek: Object.freeze({
+    provider: DEEPSEEK_PROVIDER,
+    model: DEEPSEEK_MODEL,
+    label: "DeepSeek"
+  }),
+  qwenMTPlus: Object.freeze({
+    provider: QWEN_MT_PROVIDER,
+    model: QWEN_MT_PLUS_MODEL,
+    label: "Qwen-MT Plus"
+  })
+});
 
 function translationDelay(milliseconds) {
   return Zotero.Promise?.delay
@@ -19,7 +62,7 @@ function translationDelay(milliseconds) {
     : new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-function parseDeepSeekResponse(response) {
+function parseAPIResponse(response) {
   if (response?.response && typeof response.response === "object") return response.response;
   if (typeof response?.responseText === "string") return JSON.parse(response.responseText);
   return response;
@@ -43,12 +86,17 @@ function positionSignature(position) {
 }
 
 var DeepSeekCredentials = {
+  provider: DEEPSEEK_PROVIDER,
+  origin: PROVIDER_CREDENTIALS_ORIGIN,
+  realm: DEEPSEEK_REALM,
+  username: PROVIDER_CREDENTIALS_USERNAME,
+
   async findLogin() {
-    const query = { origin: DEEPSEEK_ORIGIN, httpRealm: DEEPSEEK_REALM };
+    const query = { origin: this.origin, httpRealm: this.realm };
     const logins = Services.logins.searchLoginsAsync
       ? await Services.logins.searchLoginsAsync(query)
-      : Services.logins.findLogins(DEEPSEEK_ORIGIN, null, DEEPSEEK_REALM);
-    return (logins || []).find(login => login.username === DEEPSEEK_USERNAME) || null;
+      : Services.logins.findLogins(this.origin, null, this.realm);
+    return (logins || []).find(login => login.username === this.username) || null;
   },
 
   async getKey() {
@@ -62,8 +110,8 @@ var DeepSeekCredentials = {
       Components.interfaces.nsILoginInfo,
       "init"
     );
-    const login = new LoginInfo(DEEPSEEK_ORIGIN, null, DEEPSEEK_REALM,
-      DEEPSEEK_USERNAME, apiKey.trim(), "", "");
+    const login = new LoginInfo(this.origin, null, this.realm,
+      this.username, apiKey.trim(), "", "");
     if (Services.logins.addLoginAsync) await Services.logins.addLoginAsync(login);
     else Services.logins.addLogin(login);
   },
@@ -84,12 +132,68 @@ var DeepSeekCredentials = {
     const status = Number(response?.status || 0);
     if (status === 401 || status === 403) throw Object.assign(new Error("API Key 无效"), { status });
     if (status < 200 || status >= 300) throw Object.assign(new Error(`DeepSeek HTTP ${status}`), { status });
-    const data = parseDeepSeekResponse(response);
+    const data = parseAPIResponse(response);
     const models = (data?.data || []).map(model => model?.id);
     if (!models.includes(DEEPSEEK_MODEL)) throw new Error(`账户不可用模型：${DEEPSEEK_MODEL}`);
     return true;
   }
 };
+
+var QwenCredentials = Object.create(DeepSeekCredentials);
+QwenCredentials.provider = QWEN_MT_PROVIDER;
+QwenCredentials.realm = QWEN_MT_REALM;
+
+QwenCredentials.validateKey = async function(apiKey, options = {}) {
+  if (!String(apiKey || "").trim()) {
+    throw Object.assign(new Error("API Key 不能为空"), { code: "missing-key" });
+  }
+  await QwenMTPlusTranslationClient.request(
+    apiKey,
+    [{
+      id: "provider-validation",
+      kind: "custom",
+      sourceText: "test",
+      sourceLanguage: "en"
+    }],
+    { cancelled: false },
+    { ...options, targetLanguage: "zh-CN" }
+  );
+  return true;
+};
+
+function getPreferenceString(name, fallback = "") {
+  try {
+    return String(Services.prefs?.getCharPref?.(name, fallback) || fallback);
+  }
+  catch (_) {
+    return fallback;
+  }
+}
+
+function getActiveTranslationProviderID() {
+  const value = getPreferenceString(
+    ACTIVE_TRANSLATION_PROVIDER_PREF,
+    DEEPSEEK_PROVIDER
+  );
+  return value === QWEN_MT_PROVIDER ? QWEN_MT_PROVIDER : DEEPSEEK_PROVIDER;
+}
+
+function setActiveTranslationProviderID(provider) {
+  const value = provider === QWEN_MT_PROVIDER
+    ? QWEN_MT_PROVIDER
+    : DEEPSEEK_PROVIDER;
+  try {
+    Services.prefs?.setCharPref?.(ACTIVE_TRANSLATION_PROVIDER_PREF, value);
+  }
+  catch (_) {
+    // Preference storage is unavailable in isolated tests and early startup.
+  }
+  return value;
+}
+
+function getQwenMTRequestOptions() {
+  return { baseURL: QWEN_MT_BASE_URL };
+}
 
 var SegmentTranslationCache = {
   db: null,
@@ -124,7 +228,8 @@ var SegmentTranslationCache = {
     return this.readyPromise;
   },
 
-  key(attachment, segment, targetLanguage) {
+  key(attachment, segment, targetLanguage,
+    modelSpec = TranslationModelRegistry.deepseek) {
     return {
       libraryID: Number(attachment?.libraryID || 0),
       attachmentKey: String(attachment?.key || attachment?.id || ""),
@@ -133,8 +238,8 @@ var SegmentTranslationCache = {
       sourceHash: stableHash(segment.sourceText),
       sourceLanguage: segment.sourceLanguage,
       targetLanguage,
-      provider: "deepseek",
-      model: DEEPSEEK_MODEL,
+      provider: modelSpec.provider,
+      model: modelSpec.model,
       promptVersion: this.promptVersion(segment)
     };
   },
@@ -150,21 +255,23 @@ var SegmentTranslationCache = {
       key.model, key.promptVersion];
   },
 
-  async get(attachment, segment, targetLanguage) {
+  async get(attachment, segment, targetLanguage,
+    modelSpec = TranslationModelRegistry.deepseek) {
     await this.init();
     if (!this.db) return null;
     const rows = await this.db.queryAsync(`SELECT translated_text AS translatedText
       FROM segment_translations WHERE library_id=? AND attachment_key=? AND segment_kind=?
       AND position_signature=? AND source_hash=? AND source_language=? AND target_language=?
       AND provider=? AND model=? AND prompt_version=?`,
-    this.values(this.key(attachment, segment, targetLanguage)));
+    this.values(this.key(attachment, segment, targetLanguage, modelSpec)));
     return rows?.[0] || null;
   },
 
-  async put(attachment, segment, targetLanguage, translatedText) {
+  async put(attachment, segment, targetLanguage, translatedText,
+    modelSpec = TranslationModelRegistry.deepseek) {
     await this.init();
     if (!this.db || !String(translatedText || "").trim()) return;
-    const key = this.key(attachment, segment, targetLanguage);
+    const key = this.key(attachment, segment, targetLanguage, modelSpec);
     await this.db.queryAsync(`INSERT OR REPLACE INTO segment_translations (
       library_id, attachment_key, segment_kind, position_signature, source_hash,
       source_language, target_language, provider, model, prompt_version,
@@ -298,7 +405,7 @@ var DeepSeekTranslationClient = {
       }
       const status = Number(response?.status || 0);
       if (status >= 200 && status < 300) {
-        const data = parseDeepSeekResponse(response);
+        const data = parseAPIResponse(response);
         return data?.choices?.[0]?.message?.content;
       }
       const error = Object.assign(new Error(`DeepSeek HTTP ${status || "unknown"}`), { status });
@@ -327,14 +434,150 @@ var DeepSeekTranslationClient = {
   }
 };
 
+var QwenMTPlusTranslationClient = {
+  provider: QWEN_MT_PROVIDER,
+  model: QWEN_MT_PLUS_MODEL,
+
+  languageName(language, source = false) {
+    const value = String(language || "").trim();
+    if (!value) {
+      if (source) return "auto";
+      throw Object.assign(new Error("Qwen-MT 目标语言不能为空"),
+        { code: "missing-target-language" });
+    }
+    const mapped = QWEN_MT_LANGUAGE_NAMES[value];
+    if (mapped) return mapped;
+    if (/^[A-Za-z][A-Za-z .-]*$/u.test(value)) return value;
+    throw Object.assign(new Error(`Qwen-MT 不支持的语言标识：${value}`),
+      { code: "unsupported-language" });
+  },
+
+  buildPayload(segment, options = {}) {
+    const sourceText = String(segment?.sourceText || "").trim();
+    if (!sourceText) {
+      throw Object.assign(new Error("Qwen-MT 输入文本不能为空"),
+        { code: "empty-source-text" });
+    }
+    const sourceLanguage = this.languageName(
+      options.sourceLanguage || segment?.sourceLanguage || "auto", true);
+    const targetLanguage = this.languageName(options.targetLanguage || "zh-CN");
+    if (targetLanguage === "auto") {
+      throw Object.assign(new Error("Qwen-MT 目标语言不能使用 auto"),
+        { code: "invalid-target-language" });
+    }
+    return {
+      model: QWEN_MT_PLUS_MODEL,
+      messages: [{ role: "user", content: sourceText }],
+      translation_options: {
+        source_lang: sourceLanguage,
+        target_lang: targetLanguage
+      }
+    };
+  },
+
+  extractText(response) {
+    const data = parseAPIResponse(response);
+    const content = data?.choices?.[0]?.message?.content
+      ?? data?.output?.choices?.[0]?.message?.content
+      ?? data?.output?.text;
+    if (typeof content !== "string" || !content.trim()) {
+      throw Object.assign(new Error("Qwen-MT 返回空译文"),
+        { code: "empty-translation" });
+    }
+    return content.trim();
+  },
+
+  async request(apiKey, segments, session, options = {}) {
+    if (!Array.isArray(segments) || segments.length !== 1) {
+      throw Object.assign(new Error("Qwen-MT 每次请求只能翻译一个分段"),
+        { code: "single-segment-only" });
+    }
+    if (!String(apiKey || "").trim()) {
+      throw Object.assign(new Error("未配置 Qwen-MT API Key"),
+        { code: "missing-key" });
+    }
+    const endpoint = `${QWEN_MT_BASE_URL}/chat/completions`;
+    const payload = this.buildPayload(segments[0], options);
+    for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS.length; attempt++) {
+      if (session?.cancelled) throw new Error("翻译已取消");
+      let response;
+      try {
+        response = await Zotero.HTTP.request("POST", endpoint, {
+          headers: {
+            Authorization: `Bearer ${apiKey.trim()}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload),
+          responseType: "json",
+          timeout: 120000,
+          successCodes: false,
+          errorDelayMax: 0
+        });
+      }
+      catch (error) {
+        if (attempt < NETWORK_RETRY_DELAYS.length) {
+          await translationDelay(NETWORK_RETRY_DELAYS[attempt]);
+          continue;
+        }
+        throw error;
+      }
+      const status = Number(response?.status || 0);
+      if (status >= 200 && status < 300) return this.extractText(response);
+      const error = Object.assign(new Error(`Qwen-MT HTTP ${status || "unknown"}`), { status });
+      if ((status === 429 || status >= 500) && attempt < NETWORK_RETRY_DELAYS.length) {
+        await translationDelay(NETWORK_RETRY_DELAYS[attempt]);
+        continue;
+      }
+      throw error;
+    }
+    throw new Error("Qwen-MT 请求失败");
+  },
+
+  async translate(apiKey, segments, session, options = {}) {
+    if (!Array.isArray(segments) || segments.length !== 1) {
+      throw Object.assign(new Error("Qwen-MT 每次请求只能翻译一个分段"),
+        { code: "single-segment-only" });
+    }
+    const text = await this.request(apiKey, segments, session, options);
+    return new Map([[segments[0].id, text]]);
+  }
+};
+
+var TranslationProviderRegistry = Object.freeze({
+  [DEEPSEEK_PROVIDER]: Object.freeze({
+    id: DEEPSEEK_PROVIDER,
+    label: "DeepSeek",
+    modelSpec: TranslationModelRegistry.deepseek,
+    credentials: DeepSeekCredentials,
+    translationClient: DeepSeekTranslationClient,
+    requestOptions() {
+      return {};
+    }
+  }),
+  [QWEN_MT_PROVIDER]: Object.freeze({
+    id: QWEN_MT_PROVIDER,
+    label: "千问",
+    modelSpec: TranslationModelRegistry.qwenMTPlus,
+    credentials: QwenCredentials,
+    translationClient: QwenMTPlusTranslationClient,
+    requestOptions: getQwenMTRequestOptions
+  })
+});
+
+function getTranslationProvider(providerID = getActiveTranslationProviderID()) {
+  return TranslationProviderRegistry[providerID]
+    || TranslationProviderRegistry[DEEPSEEK_PROVIDER];
+}
+
 var TranslationCoordinator = {
-  result(segment, status, translatedText = "", error = null) {
+  result(segment, status, translatedText = "", error = null,
+    modelSpec = TranslationModelRegistry.deepseek) {
     return {
       segmentID: segment.id,
       status,
       translatedText,
-      provider: "deepseek",
-      model: DEEPSEEK_MODEL,
+      provider: modelSpec.provider,
+      model: modelSpec.model,
       promptVersion: SegmentTranslationCache.promptVersion(segment),
       errorCode: error?.code || (error?.status ? `http-${error.status}` : ""),
       errorMessage: error ? String(error.message || error).slice(0, 500) : ""
@@ -342,7 +585,14 @@ var TranslationCoordinator = {
   },
 
   async translateSegments({ attachment, segments, sourceLanguage = "en",
-    targetLanguage = "zh-CN", session = {}, bypassCache = false }) {
+    targetLanguage = "zh-CN", session = {}, bypassCache = false,
+    modelSpec = null, credentials = null, translationClient = null,
+    requestOptions = null }) {
+    const provider = getTranslationProvider(modelSpec?.provider);
+    modelSpec = modelSpec || provider.modelSpec;
+    credentials = credentials || provider.credentials;
+    translationClient = translationClient || provider.translationClient;
+    requestOptions = requestOptions || provider.requestOptions();
     const results = new Map();
     const eligible = [];
     for (const segment of segments || []) {
@@ -352,38 +602,41 @@ var TranslationCoordinator = {
       const confidenceAllowed = selection
         || ["high", "medium"].includes(segment.confidence);
       if (!eligibleKind || segment.sourceLanguage !== sourceLanguage || !confidenceAllowed) {
-        results.set(segment.id, this.result(segment, "skipped"));
+        results.set(segment.id, this.result(segment, "skipped", "", null, modelSpec));
         continue;
       }
       const cached = bypassCache ? null
-        : await SegmentTranslationCache.get(attachment, segment, targetLanguage);
+        : await SegmentTranslationCache.get(attachment, segment, targetLanguage, modelSpec);
       if (cached?.translatedText) results.set(segment.id,
-        this.result(segment, "cached", cached.translatedText));
+        this.result(segment, "cached", cached.translatedText, null, modelSpec));
       else eligible.push(segment);
     }
     if (!eligible.length) return { results, diagnostics: this.diagnostics(results) };
-    const apiKey = await DeepSeekCredentials.getKey();
+    const apiKey = await credentials.getKey();
     if (!apiKey) {
+      const providerLabel = modelSpec.label || modelSpec.provider;
       for (const segment of eligible) results.set(segment.id,
-        this.result(segment, "failed", "", Object.assign(new Error("未配置 DeepSeek API Key"), { code: "missing-key" })));
+        this.result(segment, "failed", "", Object.assign(new Error(`未配置 ${providerLabel} API Key`),
+          { code: "missing-key" }), modelSpec));
       return { results, diagnostics: this.diagnostics(results) };
     }
     for (const segment of eligible) {
       try {
-        const translated = await DeepSeekTranslationClient.translate(apiKey, [segment], session);
+        const translated = await translationClient.translate(
+          apiKey, [segment], session, requestOptions);
         const text = translated.get(segment.id);
-        await SegmentTranslationCache.put(attachment, segment, targetLanguage, text);
-        results.set(segment.id, this.result(segment, "translated", text));
+        await SegmentTranslationCache.put(attachment, segment, targetLanguage, text, modelSpec);
+        results.set(segment.id, this.result(segment, "translated", text, null, modelSpec));
       }
       catch (error) {
-        results.set(segment.id, this.result(segment, "failed", "", error));
+        results.set(segment.id, this.result(segment, "failed", "", error, modelSpec));
         if (error.status === 401 || error.status === 403) break;
       }
     }
     for (const segment of eligible) {
       if (!results.has(segment.id)) {
-        results.set(segment.id, this.result(segment, "failed", "",
-          Object.assign(new Error("认证失败，翻译队列已停止"), { code: "auth-stopped" })));
+        results.set(segment.id, this.result(segment, "failed", "", Object.assign(
+          new Error("认证失败，翻译队列已停止"), { code: "auth-stopped" }), modelSpec));
       }
     }
     return { results, diagnostics: this.diagnostics(results) };

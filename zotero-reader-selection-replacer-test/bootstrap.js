@@ -1,10 +1,15 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "0.4.13";
+const PLUGIN_VERSION = "1.0.0";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
-const TOOLBAR_BUTTON_ID = "reader-selection-replacer-test-auto-button";
-const TOOLBAR_STATUS_ID = "reader-selection-replacer-test-auto-status";
+const PANE_ID = "reader-selection-replacer-test-pane";
+const PANEL_LOCALE_FILE = "reader-selection-replacer-test.ftl";
+const LEGACY_TOOLBAR_IDS = Object.freeze([
+  "reader-selection-replacer-test-auto-button",
+  "reader-selection-replacer-test-auto-button-key",
+  "reader-selection-replacer-test-auto-status"
+]);
 const LAYER_CLASS = "reader-selection-replacer-test-layer";
 const PARAGRAPH_TRANSLATION_INDENT = "　　";
 const PARAGRAPH_MARK_COLORS = [
@@ -18,6 +23,30 @@ const AUTO_TARGET_LABELS = Object.freeze({
   title: "标题",
   abstract: "摘要"
 });
+
+function createPanelLocalization() {
+  const LocalizationConstructor = globalThis.Localization
+    || (typeof Localization === "undefined" ? null : Localization);
+  if (typeof LocalizationConstructor !== "function") return null;
+  try {
+    return new LocalizationConstructor([PANEL_LOCALE_FILE], true);
+  }
+  catch (error) {
+    Zotero.logError?.(error);
+    return null;
+  }
+}
+
+function insertPanelLocalizationIntoMainWindows() {
+  for (const win of Zotero.getMainWindows?.() || []) {
+    try {
+      win.MozXULElement?.insertFTLIfNeeded?.(PANEL_LOCALE_FILE);
+    }
+    catch (error) {
+      Zotero.logError?.(error);
+    }
+  }
+}
 
 function normalizeComparableText(value) {
   return String(value || "")
@@ -1846,7 +1875,8 @@ var SelectionReplacerOverlay = {
           this.remove(state.reader);
           SelectionReplacerTest.autoSessions?.delete(state.reader);
           SelectionReplacerTest.selectionSessions?.delete(state.reader);
-          SelectionReplacerTest.toolbarStatus?.delete(state.reader);
+          SelectionReplacerTest.readerStatus?.delete(state.reader);
+          SelectionReplacerTest.refreshAllPanels?.();
           return;
         }
         this.schedule(state, 0);
@@ -2112,14 +2142,9 @@ var SelectionReplacerOverlay = {
       const chunks = translatedText
         ? this.splitSelectionTranslation(translatedText, merged)
         : merged.map(() => "");
-      const sourceText = String(segment?.sourceText
-        || paragraph.translationText || paragraph.sourceText || "");
-      const sourceChunks = sourceText
-        ? this.splitSelectionTranslation(sourceText, merged)
-        : merged.map(() => "");
       const results = merged.map((part, partIndex) => this.renderTranslatedSelectionTarget(
         state, part, paragraph, segment, paragraphIndex, partIndex, displayIndex,
-        translation, chunks[partIndex] || "", sourceChunks[partIndex] || "", record));
+        translation, chunks[partIndex] || "", record));
       record.selectionLayoutResults ||= new Map();
       if (segment) record.selectionLayoutResults.set(segment.id, results);
     });
@@ -2616,6 +2641,21 @@ var SelectionReplacerOverlay = {
     });
   },
 
+  applyTranslationDisplay(root, textNode, badge, showingOriginal, background) {
+    if (!root || !textNode) return;
+    root.style.background = showingOriginal ? "transparent" : background;
+    if (showingOriginal) {
+      textNode.textContent = "";
+      textNode.style.display = "none";
+      textNode.style.visibility = "hidden";
+      if (badge) badge.style.display = "none";
+      return;
+    }
+    textNode.style.display = "";
+    textNode.style.visibility = "visible";
+    if (badge) badge.style.display = "";
+  },
+
   renderTranslatedTarget(state, part, target, targetIndex, partIndex, translatedText,
     translation = null, record = null) {
     const layer = this.ensureLayer(state, part.pageIndex);
@@ -2661,11 +2701,18 @@ var SelectionReplacerOverlay = {
     });
     root.append(textNode);
     layer.append(root);
-    const originalText = String(target.text || "");
     const displayKey = this.translationDisplayKey({ targetKind: target.kind,
       targetIndex, partIndex });
+    let badge = null;
     const renderDisplay = showingOriginal => {
-      const displayText = showingOriginal ? originalText : translatedText;
+      this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
+      if (showingOriginal) {
+        root.dataset.translationDisplayMode = "original";
+        return { rendered: true, layoutMode: "original-page", lines: [],
+          fontSize: 0, lineHeight: 0, sourceRectCount: part.sourceRects.length,
+          mergedRectCount: 1, failureReason: "" };
+      }
+      const displayText = translatedText;
       let displayFitted;
       if (!displayText) {
         displayFitted = this.renderTranslationStatus(textNode, target.kind,
@@ -2707,30 +2754,30 @@ var SelectionReplacerOverlay = {
     const displayStatus = ["cached", "translated"].includes(translation?.status)
       && translatedText && !String(translationFitted.layoutMode || "").endsWith("-status")
       ? "success" : "failure";
-    const showingOriginal = Boolean(storedOriginal && displayStatus === "success" && originalText);
+    const showingOriginal = Boolean(storedOriginal && displayStatus === "success");
     if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
     const fitted = showingOriginal ? renderDisplay(true) : translationFitted;
     const decoration = this.translationDecoration(target.kind, displayStatus);
     root.style.border = decoration.border;
     root.dataset.translationDisplayStatus = displayStatus;
     if (decoration.showBadge) {
-      const badge = doc.createElement("span");
+      badge = doc.createElement("span");
       badge.className = "reader-selection-replacer-test-auto-badge";
       badge.textContent = decoration.badgeText;
       this.style(badge, { position: "absolute", left: "0", top: "0", zIndex: "3",
         padding: "0 3px", color: "#ffffff", background: accent,
         font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none" });
+      badge.style.display = fitted.layoutMode === "original-page" ? "none" : "";
       root.append(badge);
     }
-    if (displayStatus === "success" && originalText) {
+    if (displayStatus === "success") {
       this.bindTranslationToggle(record, root, textNode, { displayKey, renderDisplay });
     }
     return { ...fitted, node: root };
   },
 
   renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
-    partIndex, displayIndex, translation = null, translatedChunk = "", sourceChunk = "",
-    record = null) {
+    partIndex, displayIndex, translation = null, translatedChunk = "", record = null) {
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2781,13 +2828,21 @@ var SelectionReplacerOverlay = {
         || segment?.metadata?.translationIndentFirstBlock);
     const displayKey = this.translationDisplayKey({ segmentID: segment?.id || "",
       partIndex });
+    let badge = null;
     const renderDisplay = showingOriginal => {
-      const displayText = showingOriginal ? sourceChunk : translatedText;
+      this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
+      if (showingOriginal) {
+        root.dataset.translationDisplayMode = "original";
+        return { rendered: true, layoutMode: "original-page", lines: [],
+          fontSize: 0, lineHeight: 0, sourceRectCount: part.sourceRects.length,
+          mergedRectCount: 1, failureReason: "" };
+      }
+      const displayText = translatedText;
       let displayFitted;
-      if (record?.translationPending && !translation && !showingOriginal) {
+      if (record?.translationPending && !translation) {
         displayFitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
       }
-      else if (!translationSucceeded && !showingOriginal) {
+      else if (!translationSucceeded) {
         const message = translation?.status === "skipped" ? "段落未翻译" : "段落翻译失败";
         displayFitted = this.renderTranslationStatus(textNode, "selection", message,
           translation?.errorCode || "missing-translation");
@@ -2802,7 +2857,7 @@ var SelectionReplacerOverlay = {
         displayFitted = this.fitSelectionText({ node: textNode, containerWidth: width,
           containerHeight: height, sourceRects: part.sourceRects,
           translatedText: displayText,
-          indentFirstBlock: !showingOriginal && indentFirstBlock });
+          indentFirstBlock });
         if (!displayFitted.rendered) {
           const layoutFailure = displayFitted;
           const status = this.renderTranslationStatus(textNode, "selection",
@@ -2819,11 +2874,11 @@ var SelectionReplacerOverlay = {
     const displayStatus = translationSucceeded && translatedText
       && !String(translationFitted.layoutMode || "").endsWith("-status")
       ? "success" : "failure";
-    const showingOriginal = Boolean(storedOriginal && displayStatus === "success" && sourceChunk);
+    const showingOriginal = Boolean(storedOriginal && displayStatus === "success");
     if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
     const fitted = showingOriginal ? renderDisplay(true) : translationFitted;
     if (partIndex === 0) {
-      const badge = doc.createElement("span");
+      badge = doc.createElement("span");
       badge.className = "reader-selection-replacer-test-paragraph-badge";
       badge.textContent = label;
       this.style(badge, {
@@ -2831,10 +2886,11 @@ var SelectionReplacerOverlay = {
         color: "#ffffff", background: accent, font: "9px/12px sans-serif",
         whiteSpace: "nowrap", pointerEvents: "none"
       });
+      badge.style.display = fitted.layoutMode === "original-page" ? "none" : "";
       root.append(badge);
     }
     root.dataset.translationDisplayStatus = displayStatus;
-    if (displayStatus === "success" && sourceChunk) {
+    if (displayStatus === "success") {
       this.bindTranslationToggle(record, root, textNode, { displayKey, renderDisplay });
     }
     return { ...fitted, node: root };
@@ -3005,13 +3061,24 @@ var SelectionReplacerOverlay = {
 };
 
 var SelectionReplacerTest = {
-  toolbarStatus: new Map(),
+  rootURI: "",
+  registeredPaneID: null,
+  localization: null,
+  panelStates: new Set(),
+  readerStatus: new Map(),
+  credentialState: "unknown",
+  activeProviderID: "deepseek",
+  providerStates: new Map(),
   autoSessions: new Map(),
   selectionSessions: new Map(),
   selectionTaskCounter: 0,
   startingReaders: new Set(),
 
   async init(rootURI) {
+    this.rootURI = rootURI;
+    await (Zotero.uiReadyPromise || Promise.resolve());
+    this.localization = createPanelLocalization();
+    insertPanelLocalizationIntoMainWindows();
     if (typeof ReaderPageDataBodyExtractor === "undefined") {
       Services.scriptloader.loadSubScript(
         `${rootURI}page-data-body-extractor.js`,
@@ -3023,6 +3090,7 @@ var SelectionReplacerTest = {
       Services.scriptloader.loadSubScript(`${rootURI}${script}`, globalThis, "UTF-8");
     }
     SegmentTranslationCache.init();
+    this.registerItemPane();
     Zotero.Reader.registerEventListener(
       "renderTextSelectionPopup",
       this.onRenderTextSelectionPopup.bind(this),
@@ -3037,12 +3105,20 @@ var SelectionReplacerTest = {
       for (const reader of Zotero.Reader?._readers || []) this.autoMarkReader(reader);
     }).catch(error => Zotero.logError?.(error));
     (Zotero.uiReadyPromise || Promise.resolve())
-      .then(() => this.promptForAPIKeyOnce()).catch(error => Zotero.logError?.(error));
+      .then(async () => {
+        this.activeProviderID = globalThis.getActiveTranslationProviderID?.()
+          || this.activeProviderID;
+        await this.revalidateProviderKey(this.activeProviderID);
+        this.refreshAllPanels();
+      }).catch(error => Zotero.logError?.(error));
     Zotero.debug?.(`[${PLUGIN_ID}] started v${PLUGIN_VERSION}`);
   },
 
   shutdown() {
     Zotero.Reader._unregisterEventListenerByPluginID?.(PLUGIN_ID);
+    if (this.registeredPaneID) {
+      Zotero.ItemPaneManager?.unregisterSection?.(this.registeredPaneID);
+    }
     for (const reader of SelectionReplacerOverlay.states.keys()) {
       SelectionReplacerOverlay.remove(reader);
     }
@@ -3050,46 +3126,772 @@ var SelectionReplacerTest = {
     for (const session of this.selectionSessions.values()) session.cancelled = true;
     this.selectionSessions.clear();
     this.startingReaders.clear();
-    this.toolbarStatus.clear();
+    this.readerStatus.clear();
+    this.panelStates.clear();
+    this.localization = null;
+    this.registeredPaneID = null;
     SegmentTranslationCache.close().catch(error => Zotero.logError?.(error));
     Zotero.debug?.(`[${PLUGIN_ID}] stopped`);
   },
 
-  setToolbarStatus(reader, text) {
-    const status = this.toolbarStatus.get(reader);
-    if (status?.isConnected !== false) {
-      if (status) status.textContent = text;
-    }
+  setReaderStatus(reader, text) {
+    if (!reader) return;
+    this.readerStatus.set(reader, String(text || ""));
+    this.refreshAllPanels();
   },
 
-  async promptForAPIKeyOnce(force = false) {
-    const existing = await DeepSeekCredentials.getKey();
-    if (existing && !force) return true;
-    if (!force && Services.prefs.getBoolPref(API_KEY_PROMPTED_PREF, false)) return false;
-    Services.prefs.setBoolPref(API_KEY_PROMPTED_PREF, true);
-    const input = { value: "" };
-    const accepted = Services.prompt.promptPassword(
-      Zotero.getMainWindow?.(),
-      existing ? "更换 DeepSeek API Key" : "配置 DeepSeek API Key",
-       "论文标题、摘要和用户主动划选的段落会发送到 DeepSeek，并可能产生 API 费用。密钥仅保存在 Zotero 本机登录管理器中。",
-      input, null, {}
+  getReaderForItem(itemID) {
+    const mainWindow = Zotero.getMainWindow?.();
+    const tabID = mainWindow?.Zotero_Tabs?.selectedID;
+    const activeReader = tabID ? Zotero.Reader?.getByTabID?.(tabID) : null;
+    const matches = reader => {
+      if (!reader) return false;
+      if (!itemID || reader.itemID === itemID) return true;
+      const attachment = Zotero.Items?.get?.(reader.itemID);
+      const parentID = attachment?.parentID || attachment?.parentItemID;
+      return parentID === itemID;
+    };
+    if (matches(activeReader)) return activeReader;
+    return (Zotero.Reader?._readers || []).find(matches) || null;
+  },
+
+  registerItemPane() {
+    const manager = Zotero.ItemPaneManager;
+    if (!manager?.registerSection) return;
+    this.registeredPaneID = manager.registerSection({
+      paneID: PANE_ID,
+      pluginID: PLUGIN_ID,
+      header: {
+        l10nID: "reader-selection-replacer-test-pane-header",
+        icon: `${this.rootURI}icons/translator-for-zotero-16.svg`
+      },
+      sidenav: {
+        l10nID: "reader-selection-replacer-test-pane-sidenav",
+        icon: `${this.rootURI}icons/translator-for-zotero-20.svg`
+      },
+      onItemChange: ({ item, tabType, setEnabled }) => {
+        setEnabled(tabType === "reader" || Boolean(item?.isPDFAttachment?.()));
+      },
+      onRender: props => this.renderItemPane(props)
+    });
+    if (!this.registeredPaneID) throw new Error("无法注册 Translator for Zotero 右侧栏。");
+  },
+
+  legacyRenderItemPane({ doc, body, item, tabType }) {
+    if (!doc || !body) return;
+    body.replaceChildren?.();
+    const container = doc.createElement("div");
+    this.stylePanel(container, {
+      display: "flex", flexDirection: "column", gap: "9px",
+      padding: "10px 12px 16px", color: "var(--fill-primary, inherit)",
+      fontSize: "13px"
+    });
+
+    const heading = doc.createElement("strong");
+    heading.textContent = "Translator for Zotero";
+    const disclosure = doc.createElement("p");
+    disclosure.textContent = "标题、摘要和用户主动划选的正文会发送到 DeepSeek；调用可能产生 API 费用。API Key 仅保存在 Zotero 本机登录管理器中。";
+    this.stylePanel(disclosure, { margin: "0", lineHeight: "1.45", opacity: "0.78" });
+
+    const apiStatus = doc.createElement("div");
+    const apiInput = doc.createElement("input");
+    apiInput.type = "password";
+    apiInput.autocomplete = "new-password";
+    apiInput.placeholder = "输入 DeepSeek API Key";
+    apiInput.setAttribute("aria-label", "DeepSeek API Key");
+    this.stylePanel(apiInput, {
+      boxSizing: "border-box", width: "100%", minHeight: "30px",
+      padding: "5px 7px", color: "inherit",
+      background: "var(--material-sidepane, rgba(127,127,127,.06))",
+      border: "1px solid var(--fill-quinary, rgba(127,127,127,.28))",
+      borderRadius: "5px", font: "inherit"
+    });
+    const apiActions = doc.createElement("div");
+    const saveKey = this.makePanelButton(doc, "保存并验证");
+    const validateKey = this.makePanelButton(doc, "验证当前密钥");
+    const deleteKey = this.makePanelButton(doc, "删除密钥", true);
+    apiActions.append(saveKey, validateKey, deleteKey);
+    this.stylePanel(apiActions, { display: "flex", flexWrap: "wrap", gap: "6px" });
+
+    const frontMatterStatus = doc.createElement("div");
+    const titleStatus = doc.createElement("div");
+    const abstractStatus = doc.createElement("div");
+    const retryActions = doc.createElement("div");
+    const retryTitle = this.makePanelButton(doc, "重试标题");
+    const retryAbstract = this.makePanelButton(doc, "重试摘要");
+    const retryAll = this.makePanelButton(doc, "全部重试");
+    retryActions.append(retryTitle, retryAbstract, retryAll);
+    this.stylePanel(retryActions, { display: "flex", flexWrap: "wrap", gap: "6px" });
+
+    const message = doc.createElement("div");
+    this.stylePanel(message, { minHeight: "18px", lineHeight: "1.4", opacity: "0.82" });
+    const version = doc.createElement("small");
+    version.textContent = `Translator for Zotero ${PLUGIN_VERSION}`;
+    version.style.opacity = "0.5";
+    container.append(
+      heading, disclosure, apiStatus, apiInput, apiActions,
+      frontMatterStatus, titleStatus, abstractStatus, retryActions, message, version
     );
-    if (!accepted) return false;
+    body.append(container);
+
+    const state = {
+      body, itemID: item?.id || null, tabType, apiStatus, apiInput,
+      saveKey, validateKey, deleteKey, frontMatterStatus, titleStatus,
+      abstractStatus, retryTitle, retryAbstract, retryAll, message
+    };
+    this.panelStates.add(state);
+    this.updatePanelState(state);
+    saveKey.addEventListener("click", () => this.saveAPIKeyFromPanel(state));
+    validateKey.addEventListener("click", () => this.revalidateAPIKey(state));
+    deleteKey.addEventListener("click", () => this.removeAPIKey(state));
+    retryTitle.addEventListener("click", () => this.retryFrontMatter(state, ["title"]));
+    retryAbstract.addEventListener("click", () => this.retryFrontMatter(state, ["abstract"]));
+    retryAll.addEventListener("click", () => this.retryFrontMatter(state, ["title", "abstract"]));
+  },
+
+  stylePanel(element, styles) {
+    for (const [name, value] of Object.entries(styles)) element.style[name] = value;
+  },
+
+  makePanelButton(doc, label, danger = false) {
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    this.stylePanel(button, {
+      minHeight: "30px", border: `1px solid ${danger ? "#b44" : "#4777a8"}`,
+      borderRadius: "5px", padding: "5px 8px", color: "inherit",
+      background: "var(--material-button, rgba(127,127,127,.08))",
+      font: "inherit", cursor: "pointer"
+    });
+    return button;
+  },
+
+  setPanelMessage(state, text, error = false) {
+    if (!state?.message) return;
+    state.message.textContent = String(text || "");
+    state.message.style.color = error ? "#c2410c" : "";
+  },
+
+  async legacySaveAPIKeyFromPanel(state) {
+    const apiKey = String(state?.apiInput?.value || "").trim();
+    if (!apiKey) {
+      this.setPanelMessage(state, "请输入 API Key。", true);
+      return false;
+    }
+    this.credentialState = "validating";
+    this.refreshAllPanels();
     try {
-      await DeepSeekCredentials.validateKey(input.value);
-      await DeepSeekCredentials.saveKey(input.value);
-      input.value = "";
-      for (const reader of Zotero.Reader?._readers || []) this.autoMarkReader(reader, true);
+      await DeepSeekCredentials.validateKey(apiKey);
+      await DeepSeekCredentials.saveKey(apiKey);
+      state.apiInput.value = "";
+      this.credentialState = "configured";
+      this.setPanelMessage(state, "DeepSeek API Key 已验证并保存。", false);
+      this.refreshAllPanels();
+      for (const reader of Zotero.Reader?._readers || []) {
+        const session = this.autoSessions.get(reader);
+        const failed = Boolean(session?.error
+          || session?.translation?.diagnostics?.failed);
+        if (failed) {
+          this.autoSessions.delete(reader);
+          this.autoMarkReader(reader).catch(error => Zotero.logError?.(error));
+        }
+      }
       return true;
     }
     catch (error) {
-      input.value = "";
-      const progress = new Zotero.ProgressWindow();
-      progress.changeHeadline("DeepSeek 配置失败");
-      progress.addDescription(String(error?.message || error));
-      progress.show();
-      progress.startCloseTimer(8000);
+      state.apiInput.value = "";
+      this.credentialState = "invalid";
+      this.setPanelMessage(state, String(error?.message || error), true);
+      this.refreshAllPanels();
       return false;
+    }
+  },
+
+  async legacyRevalidateAPIKey(state = null) {
+    const apiKey = await DeepSeekCredentials.getKey();
+    if (!apiKey) {
+      this.credentialState = "missing";
+      this.setPanelMessage(state, "尚未配置 API Key。", true);
+      this.refreshAllPanels();
+      return false;
+    }
+    this.credentialState = "validating";
+    this.refreshAllPanels();
+    try {
+      await DeepSeekCredentials.validateKey(apiKey);
+      this.credentialState = "configured";
+      this.setPanelMessage(state, "DeepSeek API Key 验证成功。", false);
+      this.refreshAllPanels();
+      return true;
+    }
+    catch (error) {
+      this.credentialState = "invalid";
+      this.setPanelMessage(state, String(error?.message || error), true);
+      this.refreshAllPanels();
+      return false;
+    }
+  },
+
+  async legacyRemoveAPIKey(state = null) {
+    await DeepSeekCredentials.deleteKey();
+    this.credentialState = "missing";
+    this.setPanelMessage(state, "DeepSeek API Key 已删除；已有缓存和覆盖层未清除。", false);
+    this.refreshAllPanels();
+    return true;
+  },
+
+  refreshAllPanels() {
+    for (const state of [...this.panelStates]) {
+      if (state.body?.isConnected === false) this.panelStates.delete(state);
+      else this.updatePanelState(state);
+    }
+  },
+
+  legacyUpdatePanelState(state) {
+    const apiLabels = {
+      unknown: "API：正在检查本机密钥…",
+      missing: "API：未配置。翻译不会启动。",
+      validating: "API：正在验证…",
+      configured: `API：已安全配置，模型 ${DEEPSEEK_MODEL}`,
+      invalid: "API：验证失败，请更换或重新验证密钥。"
+    };
+    state.apiStatus.textContent = apiLabels[this.credentialState] || apiLabels.unknown;
+    state.saveKey.textContent = this.credentialState === "configured"
+      ? "更换并验证" : "保存并验证";
+    const reader = this.getReaderForItem(state.itemID);
+    const session = reader ? this.autoSessions.get(reader) : null;
+    state.frontMatterStatus.textContent = this.readerStatus.get(reader)
+      || "标题/摘要：等待打开 PDF";
+    state.titleStatus.textContent = this.formatAutoTargetStatus(session, "title");
+    state.abstractStatus.textContent = this.formatAutoTargetStatus(session, "abstract");
+    const busy = Boolean(reader && this.startingReaders.has(reader));
+    state.retryTitle.disabled = !reader || busy;
+    state.retryAbstract.disabled = !reader || busy;
+    state.retryAll.disabled = !reader || busy;
+    state.validateKey.disabled = this.credentialState === "validating";
+    state.saveKey.disabled = this.credentialState === "validating";
+  },
+
+  getProvider(providerID = this.activeProviderID) {
+    return globalThis.getTranslationProvider?.(providerID)
+      || globalThis.TranslationProviderRegistry?.[providerID]
+      || globalThis.TranslationProviderRegistry?.deepseek
+      || {
+        id: "deepseek",
+        label: "DeepSeek",
+        modelSpec: { model: "deepseek-v4-flash" },
+        credentials: null,
+        requestOptions() { return {}; }
+      };
+  },
+
+  getProviderState(providerID = this.activeProviderID) {
+    const id = providerID === "qwen-mt" ? "qwen-mt" : "deepseek";
+    if (!this.providerStates.has(id)) {
+      this.providerStates.set(id, {
+        status: "missing",
+        message: "",
+        validationToken: 0
+      });
+    }
+    return this.providerStates.get(id);
+  },
+
+  setProviderState(providerID, status, message = "") {
+    const state = this.getProviderState(providerID);
+    state.status = status;
+    state.message = String(message || "");
+    if (providerID === this.activeProviderID) this.credentialState = status;
+    return state;
+  },
+
+  setPanelText(element, l10nID, fallback, doc = element?.ownerDocument) {
+    if (!element) return;
+    element.setAttribute?.("data-l10n-id", l10nID);
+    element.textContent = fallback;
+    doc?.l10n?.setAttributes?.(element, l10nID);
+  },
+
+  maskAPIKey(apiKey) {
+    const value = String(apiKey || "").trim();
+    if (!value) return "";
+    if (value.length <= 6) return "***";
+    return value.slice(0, 4) + "***" + value.slice(-4);
+  },
+
+  providerRequestOptions(provider) {
+    try {
+      return provider?.requestOptions?.() || {};
+    }
+    catch (error) {
+      return { error };
+    }
+  },
+
+  providerStatusText(provider, state) {
+    switch (state?.status) {
+      case "configured":
+        return "验证成功 · " + (provider?.modelSpec?.model || provider?.label || "");
+      case "validating":
+        return "正在验证…";
+      case "invalid":
+        return "验证失败";
+      case "unknown":
+        return "正在检查";
+      case "missing":
+      default:
+        return "未输入";
+    }
+  },
+
+  providerStatusColor(status) {
+    if (status === "configured") return "#16a34a";
+    if (status === "invalid") return "#dc2626";
+    return "#9ca3af";
+  },
+
+  makeStatusLamp(doc) {
+    const lamp = doc.createElement("span");
+    lamp.setAttribute("aria-hidden", "true");
+    this.stylePanel(lamp, {
+      display: "inline-block",
+      width: "9px",
+      height: "9px",
+      borderRadius: "50%",
+      flex: "0 0 auto",
+      background: "#9ca3af",
+      boxShadow: "0 0 0 1px rgba(0,0,0,.18)"
+    });
+    return lamp;
+  },
+
+  makeRetryButton(doc) {
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.textContent = "↻";
+    button.title = "重试验证";
+    button.setAttribute("aria-label", "重试验证");
+    this.stylePanel(button, {
+      width: "24px",
+      height: "24px",
+      padding: "0",
+      border: "0",
+      borderRadius: "50%",
+      color: "inherit",
+      background: "transparent",
+      fontSize: "18px",
+      lineHeight: "22px",
+      cursor: "pointer"
+    });
+    return button;
+  },
+
+  renderItemPane({ doc, body, item, tabType }) {
+    if (!doc || !body) return;
+    for (const oldState of [...this.panelStates]) {
+      if (oldState.body === body) this.panelStates.delete(oldState);
+    }
+    body.replaceChildren?.();
+
+    const container = doc.createElement("div");
+    this.stylePanel(container, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "18px",
+      padding: "18px 14px 20px",
+      color: "var(--fill-primary, inherit)",
+      fontSize: "14px",
+      boxSizing: "border-box",
+      width: "100%"
+    });
+
+
+   const providerButtons = doc.createElement("div");
+    this.stylePanel(providerButtons, {
+      display: "flex",
+      width: "100%",
+      gap: "0"
+    });
+    const qwenButton = this.makePanelButton(doc, "千问");
+    const deepSeekButton = this.makePanelButton(doc, "deepseek");
+    qwenButton.dataset.provider = "qwen-mt";
+    deepSeekButton.dataset.provider = "deepseek";
+    qwenButton.setAttribute("aria-pressed", "false");
+    deepSeekButton.setAttribute("aria-pressed", "false");
+    this.setPanelText(qwenButton,
+      "reader-selection-replacer-test-pane-provider-qwen", "千问", doc);
+    this.setPanelText(deepSeekButton,
+      "reader-selection-replacer-test-pane-provider-deepseek", "deepseek", doc);
+    this.stylePanel(qwenButton, {
+      flex: "1",
+      minHeight: "42px",
+      borderRadius: "4px 0 0 4px",
+      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      background: "transparent",
+      fontSize: "15px"
+    });
+    this.stylePanel(deepSeekButton, {
+      flex: "1",
+      minHeight: "42px",
+      borderRadius: "0 4px 4px 0",
+      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderLeft: "0",
+      background: "transparent",
+      fontSize: "15px"
+    });
+    providerButtons.append(qwenButton, deepSeekButton);
+
+    const inputSection = doc.createElement("div");
+    this.stylePanel(inputSection, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "7px"
+    });
+    const apiInput = doc.createElement("input");
+    apiInput.type = "password";
+    apiInput.autocomplete = "new-password";
+    apiInput.spellcheck = false;
+    this.stylePanel(apiInput, {
+      boxSizing: "border-box",
+      width: "100%",
+      minHeight: "48px",
+      padding: "8px 12px",
+      color: "inherit",
+      background: "transparent",
+      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "3px",
+      font: "inherit"
+    });
+    const statusRow = doc.createElement("div");
+    this.stylePanel(statusRow, {
+      display: "flex",
+      alignItems: "center",
+      gap: "7px",
+      minHeight: "24px",
+      color: "var(--fill-secondary, inherit)"
+    });
+    const statusLamp = this.makeStatusLamp(doc);
+    const apiStatus = doc.createElement("span");
+    const retryValidation = this.makeRetryButton(doc);
+    statusRow.append(statusLamp, apiStatus, retryValidation);
+    inputSection.append(apiInput, statusRow);
+
+    const actions = doc.createElement("div");
+    this.stylePanel(actions, {
+      display: "flex",
+      justifyContent: "space-between",
+      gap: "16px"
+    });
+    const resetKey = this.makePanelButton(doc, "重置", true);
+    const saveKey = this.makePanelButton(doc, "保存");
+    this.setPanelText(resetKey,
+      "reader-selection-replacer-test-pane-reset", "重置", doc);
+    this.setPanelText(saveKey,
+      "reader-selection-replacer-test-pane-save", "保存", doc);
+    this.stylePanel(resetKey, {
+      flex: "0 1 42%",
+      minHeight: "42px",
+      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "3px",
+      background: "transparent",
+      fontSize: "15px"
+    });
+    this.stylePanel(saveKey, {
+      flex: "0 1 42%",
+      minHeight: "42px",
+      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "3px",
+      background: "transparent",
+      fontSize: "15px"
+    });
+    actions.append(resetKey, saveKey);
+
+    const message = doc.createElement("div");
+    this.stylePanel(message, {
+      minHeight: "18px",
+      lineHeight: "1.4",
+      color: "var(--fill-secondary, inherit)"
+    });
+    container.append(providerButtons, inputSection, actions, message);
+    body.append(container);
+
+    const state = {
+      body,
+     itemID: item?.id || null,
+     tabType,
+     container,
+     providerButtons,
+      qwenButton,
+      deepSeekButton,
+      inputSection,
+      apiInput,
+      statusRow,
+      statusLamp,
+      apiStatus,
+      retryValidation,
+      resetKey,
+      saveKey,
+      message,
+      providerID: this.activeProviderID,
+      savedKey: "",
+      loadToken: 0
+    };
+    this.panelStates.add(state);
+    qwenButton.addEventListener("click", () =>
+      this.selectProviderForPanels("qwen-mt"));
+    deepSeekButton.addEventListener("click", () =>
+      this.selectProviderForPanels("deepseek"));
+    apiInput.addEventListener("input", () => {
+      state.inputDirty = true;
+    });
+    saveKey.addEventListener("click", () => this.saveAPIKeyFromPanel(state));
+    resetKey.addEventListener("click", () => this.removeAPIKey(state));
+    retryValidation.addEventListener("click", () => this.revalidateAPIKey(state));
+
+    this.updatePanelState(state);
+    this.loadProviderIntoPanel(state, true);
+  },
+
+  async selectProviderForPanels(providerID) {
+    const id = providerID === "qwen-mt" ? "qwen-mt" : "deepseek";
+    this.activeProviderID = globalThis.setActiveTranslationProviderID?.(id) || id;
+    for (const state of [...this.panelStates]) {
+      state.providerID = this.activeProviderID;
+      this.loadProviderIntoPanel(state, true);
+    }
+    this.refreshAllPanels();
+  },
+
+  async loadProviderIntoPanel(state, validate = true) {
+    if (!state) return false;
+    const token = ++state.loadToken;
+    state.providerID = this.activeProviderID;
+    state.savedKey = "";
+    state.apiInput.value = "";
+    state.inputDirty = false;
+    state.message.textContent = "";
+    this.setProviderState(state.providerID, "missing", "");
+    this.updatePanelState(state);
+    const provider = this.getProvider(state.providerID);
+    const credentials = provider.credentials;
+    if (!credentials?.getKey) return false;
+    let apiKey = "";
+    try {
+      apiKey = String(await credentials.getKey() || "").trim();
+    }
+    catch (error) {
+      this.setProviderState(state.providerID, "invalid", String(error?.message || error));
+      this.updatePanelState(state);
+      return false;
+    }
+    if (token !== state.loadToken) return false;
+    state.savedKey = apiKey;
+    this.updatePanelState(state);
+    if (!apiKey || !validate) {
+      this.setProviderState(state.providerID, apiKey ? "unknown" : "missing", "");
+      this.updatePanelState(state);
+      return Boolean(apiKey);
+    }
+    return this.revalidateAPIKey(state, { apiKey, saveOnSuccess: false });
+  },
+
+  async revalidateProviderKey(providerID = this.activeProviderID) {
+    const provider = this.getProvider(providerID);
+    const credentials = provider.credentials;
+    const state = this.setProviderState(provider.id, "missing", "");
+    if (!credentials?.getKey) return false;
+    const apiKey = String(await credentials.getKey() || "").trim();
+    if (!apiKey) {
+      state.status = "missing";
+      this.refreshAllPanels();
+      return false;
+    }
+    const requestOptions = this.providerRequestOptions(provider);
+    state.status = "validating";
+    this.refreshAllPanels();
+    try {
+      await credentials.validateKey(apiKey, requestOptions);
+      state.status = "configured";
+      state.message = "";
+      this.refreshAllPanels();
+      return true;
+    }
+    catch (error) {
+      state.status = "invalid";
+      state.message = String(error?.message || error);
+      this.refreshAllPanels();
+      return false;
+    }
+  },
+
+  async saveAPIKeyFromPanel(state) {
+    if (!state) return false;
+    const provider = this.getProvider(state.providerID);
+    const credentials = provider.credentials;
+    const inputKey = String(state.apiInput?.value || "").trim();
+    const apiKey = inputKey || state.savedKey
+      || String(await credentials?.getKey?.() || "").trim();
+    if (!apiKey) {
+      this.setProviderState(state.providerID, "missing", "请输入 API Key。");
+      this.setPanelMessage(state, "请输入 API Key。", false);
+      this.updatePanelState(state);
+      return false;
+    }
+    return this.revalidateAPIKey(state, { apiKey, saveOnSuccess: Boolean(inputKey) });
+  },
+
+  async revalidateAPIKey(state = null, options = {}) {
+    const providerID = state?.providerID || this.activeProviderID;
+    const provider = this.getProvider(providerID);
+    const credentials = provider.credentials;
+    const inputKey = String(state?.apiInput?.value || "").trim();
+    const apiKey = String(options.apiKey || inputKey || state?.savedKey
+      || await credentials?.getKey?.() || "").trim();
+    if (!apiKey) {
+      this.setProviderState(providerID, "missing", "请输入 API Key。");
+      if (state) this.setPanelMessage(state, "请输入 API Key。", false);
+      this.updatePanelState(state);
+      return false;
+    }
+    const requestOptions = this.providerRequestOptions(provider);
+    const providerState = this.setProviderState(providerID, "validating", "");
+    const token = ++providerState.validationToken;
+    this.refreshAllPanels();
+    try {
+      await credentials.validateKey(apiKey, requestOptions);
+      if (token !== providerState.validationToken) return false;
+      const shouldSave = options.saveOnSuccess !== false
+        && Boolean(inputKey)
+        && inputKey !== state?.savedKey;
+      if (shouldSave) {
+        await credentials.saveKey(inputKey);
+        if (state) state.savedKey = inputKey;
+      }
+      if (state && shouldSave) state.apiInput.value = "";
+      providerState.status = "configured";
+      providerState.message = "";
+      if (state) this.setPanelMessage(state,
+        provider.label + " API Key 验证成功。", false);
+      this.refreshAllPanels();
+      this.restartFailedAutoSessions();
+      return true;
+    }
+    catch (error) {
+      if (token !== providerState.validationToken) return false;
+      providerState.status = "invalid";
+      providerState.message = String(error?.message || error);
+      if (state) this.setPanelMessage(state, providerState.message, true);
+      this.refreshAllPanels();
+      return false;
+    }
+  },
+
+  async removeAPIKey(state = null) {
+    const providerID = state?.providerID || this.activeProviderID;
+    const provider = this.getProvider(providerID);
+    const confirmed = Services.prompt?.confirm
+      ? Services.prompt.confirm(null, "Translator for Zotero", "确定删除当前模型的 API Key？")
+      : true;
+    if (!confirmed) return false;
+    try {
+      await provider.credentials?.deleteKey?.();
+      if (state) {
+        state.savedKey = "";
+        state.apiInput.value = "";
+        state.inputDirty = false;
+      }
+      this.setProviderState(providerID, "missing", "");
+      if (state) this.setPanelMessage(state, provider.label + " API Key 已删除。", false);
+      this.refreshAllPanels();
+      return true;
+    }
+    catch (error) {
+      this.setProviderState(providerID, "invalid", String(error?.message || error));
+      if (state) this.setPanelMessage(state, String(error?.message || error), true);
+      this.refreshAllPanels();
+      return false;
+    }
+  },
+
+  restartFailedAutoSessions() {
+    for (const reader of Zotero.Reader?._readers || []) {
+      const session = this.autoSessions.get(reader);
+      const failed = Boolean(session?.error || session?.translation?.diagnostics?.failed);
+      if (failed) {
+        this.autoSessions.delete(reader);
+        this.autoMarkReader(reader).catch(error => Zotero.logError?.(error));
+      }
+    }
+  },
+
+  updatePanelState(state) {
+    if (!state) return;
+    const provider = this.getProvider(state.providerID || this.activeProviderID);
+    const providerState = this.getProviderState(state.providerID || this.activeProviderID);
+    const isQwen = provider.id === "qwen-mt";
+    state.qwenButton.setAttribute("aria-pressed", String(isQwen));
+    state.deepSeekButton.setAttribute("aria-pressed", String(!isQwen));
+    state.qwenButton.style.background = isQwen
+      ? "var(--material-button-hover, rgba(0,0,0,.12))" : "transparent";
+    state.deepSeekButton.style.background = isQwen
+      ? "transparent" : "var(--material-button-hover, rgba(0,0,0,.12))";
+    state.apiInput.placeholder = state.savedKey
+      ? "已保存：" + this.maskAPIKey(state.savedKey)
+      : (isQwen ? "输入千问 API Key" : "输入 DeepSeek API Key");
+    state.apiInput.setAttribute("aria-label",
+      isQwen ? "千问 API Key" : "DeepSeek API Key");
+    state.apiStatus.textContent = this.providerStatusText(provider, providerState);
+    state.statusLamp.style.background = this.providerStatusColor(providerState.status);
+    state.retryValidation.style.visibility =
+      providerState.status === "invalid" ? "visible" : "hidden";
+    state.retryValidation.disabled = providerState.status === "validating";
+    state.saveKey.disabled = providerState.status === "validating";
+    state.resetKey.disabled = providerState.status === "validating";
+    if (providerState.message && !state.message.textContent) {
+      state.message.textContent = providerState.message;
+    }
+  },
+
+  formatAutoTargetStatus(session, kind) {
+    const label = AUTO_TARGET_LABELS[kind] || kind;
+    if (!session) return `${label}：未开始`;
+    if (session.error) return `${label}：处理失败`;
+    const target = (session.result?.targets || []).find(value => value.kind === kind);
+    if (!target) return `${label}：未定位`;
+    const translation = session.translation?.results?.get?.(kind);
+    if (["cached", "translated"].includes(translation?.status)) {
+      return `${label}：已完成${translation.status === "cached" ? "（缓存）" : ""}`;
+    }
+    if (translation?.status === "failed") return `${label}：翻译失败`;
+    if (translation?.status === "skipped") return `${label}：未翻译`;
+    return `${label}：等待翻译`;
+  },
+
+  async retryFrontMatter(state, targetKinds) {
+    const reader = this.getReaderForItem(state?.itemID);
+    if (!reader) {
+      this.setPanelMessage(state, "当前没有可用的 PDF Reader。", true);
+      return null;
+    }
+    this.setPanelMessage(state, `正在重试${targetKinds.length === 2 ? "标题和摘要" : AUTO_TARGET_LABELS[targetKinds[0]]}…`);
+    try {
+      const session = await this.autoMarkReader(reader, { force: true, targetKinds });
+      const attempt = session?.translationAttempt;
+      const diagnostics = attempt?.diagnostics;
+      if (diagnostics?.failed) {
+        this.setPanelMessage(state,
+          `重试完成：${diagnostics.failed} 个目标失败；已有译文已保留。`, true);
+      }
+      else {
+        const completed = (diagnostics?.translated || 0) + (diagnostics?.cached || 0);
+        this.setPanelMessage(state, `重试完成：${completed}/${targetKinds.length} 个目标可用。`);
+      }
+      this.refreshAllPanels();
+      return session;
+    }
+    catch (error) {
+      this.setPanelMessage(state, String(error?.message || error), true);
+      return null;
     }
   },
 
@@ -3127,95 +3929,95 @@ var SelectionReplacerTest = {
     return `${format("title")} | ${format("abstract")}`;
   },
 
-  onRenderToolbar({ reader, doc, append }) {
-    if (!reader || !doc || typeof append !== "function") return;
-    let button = doc.getElementById(TOOLBAR_BUTTON_ID);
-    if (!button) {
-      button = doc.createElement("button");
-      button.id = TOOLBAR_BUTTON_ID;
-      button.type = "button";
-      button.className = "toolbar-button wide-button";
-      button.textContent = "重译标题/摘要";
-      button.title = "重新读取 Zotero 元数据并翻译 PDF 标题和摘要";
-      button.setAttribute("aria-label", button.title);
-      button.addEventListener("click", () => this.autoMarkReader(reader, true, button));
-      append(button);
+  onRenderToolbar({ reader, doc }) {
+    if (!reader) return;
+    const toolbarDocument = doc
+      || reader?._internalReader?._primaryView?._iframeWindow?.document;
+    for (const id of LEGACY_TOOLBAR_IDS) {
+      toolbarDocument?.getElementById?.(id)?.remove?.();
     }
-    const keyButtonID = `${TOOLBAR_BUTTON_ID}-key`;
-    if (!doc.getElementById(keyButtonID)) {
-      const keyButton = doc.createElement("button");
-      keyButton.id = keyButtonID;
-      keyButton.type = "button";
-      keyButton.className = "toolbar-button";
-      keyButton.textContent = "DeepSeek Key";
-      keyButton.title = "配置或更换 DeepSeek API Key";
-      keyButton.addEventListener("click", () => this.promptForAPIKeyOnce(true));
-      append(keyButton);
-    }
-    let status = doc.getElementById(TOOLBAR_STATUS_ID);
-    if (!status) {
-      status = doc.createElement("span");
-      status.id = TOOLBAR_STATUS_ID;
-      status.style.fontSize = "11px";
-      status.style.opacity = "0.78";
-      status.style.marginInlineStart = "6px";
-      append(status);
-    }
-    this.toolbarStatus.set(reader, status);
     if (!this.autoSessions.has(reader) && !this.startingReaders.has(reader)) {
-      Promise.resolve().then(() => this.autoMarkReader(reader, false, button))
+      Promise.resolve().then(() => this.autoMarkReader(reader))
         .catch(error => Zotero.logError?.(error));
     }
   },
 
-  async autoMarkReader(reader, force = false, button = null) {
+  async autoMarkReader(reader, options = {}) {
     if (!reader) return null;
-    if (!force && (this.autoSessions.has(reader) || this.startingReaders.has(reader))) {
+    const config = typeof options === "boolean" ? { force: options } : (options || {});
+    const force = Boolean(config.force);
+    const targetKinds = Array.isArray(config.targetKinds) && config.targetKinds.length
+      ? new Set(config.targetKinds.map(String)) : null;
+    if (!force && (this.startingReaders.has(reader)
+      || (this.autoSessions.has(reader) && !this.autoSessions.get(reader)?.error))) {
       return this.autoSessions.get(reader) || null;
     }
     if (this.startingReaders.has(reader)) return null;
+    const previous = this.autoSessions.get(reader);
     if (force) {
-      const previous = this.autoSessions.get(reader);
       if (previous) previous.cancelled = true;
-      this.autoSessions.delete(reader);
-      SelectionReplacerOverlay.removeRecord(reader, "front-matter");
     }
     this.startingReaders.add(reader);
-    if (button) button.disabled = true;
-    this.setToolbarStatus(reader, "正在识别标题/摘要…");
+    this.setReaderStatus(reader, "正在识别标题/摘要…");
+    let session = null;
     try {
       const view = await this.waitForPDFView(reader);
       const metadata = await ReaderMetadataLoader.read(reader);
-      const result = await ReaderTargetLocator.locate(view, metadata);
-      const segments = ContentSegments.fromTargets(result.targets);
+      const located = await ReaderTargetLocator.locate(view, metadata);
       const attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
-      const session = { reader, view, result, segments, attachment, cancelled: false };
+      const previousRecord = SelectionReplacerOverlay.states.get(reader)?.records?.get("front-matter");
+      const oldTargets = previous?.result?.targets || previousRecord?.targets || [];
+      const targetMap = new Map(oldTargets.map(target => [target.kind, target]));
+      for (const target of located.targets || []) targetMap.set(target.kind, target);
+      const targets = [...targetMap.values()];
+      const requestedTargets = targetKinds
+        ? targets.filter(target => targetKinds.has(target.kind))
+        : targets;
+      const segments = ContentSegments.fromTargets(requestedTargets);
+      const retainedResults = new Map(previous?.translation?.results
+        || previousRecord?.translations || []);
+      session = {
+        reader, view, result: { ...located, targets }, segments, attachment,
+        cancelled: false, retryKinds: targetKinds
+      };
       this.autoSessions.set(reader, session);
-      if (result.targets.length) {
-        SelectionReplacerOverlay.attach(reader, view, result.targets,
+      if (targets.length) {
+        SelectionReplacerOverlay.attach(reader, view, targets,
           { mode: "diagnostic", recordID: "front-matter", segments,
-            translations: new Map() });
+            translations: retainedResults });
       }
-      this.setToolbarStatus(reader, this.formatAutoStatusV2(result));
+      this.setReaderStatus(reader, this.formatAutoStatusV2({ ...located, targets }));
       const translation = await TranslationCoordinator.translateSegments({
         attachment, segments, session, bypassCache: force
       });
+      if (session.cancelled) return session;
+      const combinedResults = new Map(retainedResults);
+      for (const [segmentID, result] of translation.results) {
+        const previousResult = combinedResults.get(segmentID);
+        if (["failed", "skipped"].includes(result.status)
+          && ["cached", "translated"].includes(previousResult?.status)) {
+          continue;
+        }
+        combinedResults.set(segmentID, result);
+      }
       session.translation = translation;
-      if (!session.cancelled && result.targets.length) {
-        SelectionReplacerOverlay.attach(reader, view, result.targets, {
+      session.translationAttempt = translation;
+      session.translation.results = combinedResults;
+      if (targets.length) {
+        SelectionReplacerOverlay.attach(reader, view, targets, {
           mode: "diagnostic", recordID: "front-matter", segments,
-          translations: translation.results
+          translations: combinedResults
         });
       }
       const translated = translation.diagnostics.translated + translation.diagnostics.cached;
-      this.setToolbarStatus(reader,
-        `${this.formatAutoStatusV2(result)} | 译文 ${translated}/${segments.length}`);
+      this.setReaderStatus(reader,
+        `${this.formatAutoStatusV2({ ...located, targets })} | 译文 ${translated}/${segments.length}`);
       Zotero.debug?.(`[${PLUGIN_ID}] automatic front matter analysis: ${JSON.stringify({
         itemID: reader.itemID,
         metadataSource: metadata.source,
         parentItemID: metadata.parentItemID,
-        diagnostics: result.diagnostics,
-        targets: result.targets.map(target => ({
+        diagnostics: located.diagnostics,
+        targets: targets.map(target => ({
           kind: target.kind,
           confidence: target.confidence,
           matchMethod: target.matchMethod,
@@ -3227,14 +4029,18 @@ var SelectionReplacerTest = {
       return session;
     }
     catch (error) {
+      if (session?.cancelled) return session;
       Zotero.logError?.(error);
-      this.setToolbarStatus(reader, `标题/摘要识别失败：${error?.message || error}`);
-      this.autoSessions.set(reader, { reader, error });
+      this.setReaderStatus(reader, `标题/摘要识别失败：${error?.message || error}`);
+      this.autoSessions.set(reader, { reader, error, result: previous?.result || null,
+        translation: previous?.translation || null });
       return null;
     }
     finally {
-      this.startingReaders.delete(reader);
-      if (button) button.disabled = false;
+      if (!session || this.autoSessions.get(reader) === session) {
+        this.startingReaders.delete(reader);
+        this.refreshAllPanels();
+      }
     }
   },
 
@@ -3375,18 +4181,43 @@ var SelectionReplacerTest = {
     const container = doc.createElement("div");
     container.className = POPUP_CLASS;
     container.style.display = "flex";
+    container.style.flexDirection = "column";
     container.style.alignItems = "center";
-    container.style.gap = "4px";
+    container.style.justifyContent = "center";
+    container.style.width = "100%";
+    container.style.gap = "6px";
+    container.style.padding = "8px 0 0";
 
     const button = doc.createElement("button");
     button.type = "button";
     button.textContent = "翻译";
     button.title = "翻译当前选区中识别到的段落";
     button.setAttribute("aria-label", button.title);
+    button.style.display = "block";
+    button.style.boxSizing = "border-box";
+    button.style.width = "calc(100% - 48px)";
+    button.style.maxWidth = "280px";
+    button.style.height = "64px";
+    button.style.minHeight = "0";
+    button.style.maxHeight = "64px";
+    button.style.margin = "0 auto";
+    button.style.padding = "4px 12px";
+    button.style.border = "2px solid var(--fill-quinary, rgba(255,255,255,.28))";
+    button.style.borderRadius = "12px";
+    button.style.background = "var(--material-button, rgba(127,127,127,.12))";
+    button.style.color = "var(--fill-primary, #f4f4f4)";
+    button.style.font = "inherit";
+    button.style.fontSize = "16px";
+    button.style.lineHeight = "1.2";
+    button.style.textAlign = "center";
+    button.style.cursor = "pointer";
+    button.style.appearance = "none";
 
     const status = doc.createElement("span");
     status.style.fontSize = "11px";
     status.style.opacity = "0.75";
+    status.style.width = "100%";
+    status.style.textAlign = "center";
 
     button.addEventListener("click", () => {
       this.translateSelection(reader, annotation, sourceText, status, button)
