@@ -21,15 +21,26 @@ const context = {
   Zotero: {
     Promise: { delay: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) },
     debug() {},
-    logError() {}
+    logError() {},
+    HTTP: { async request() { throw new Error("unexpected network request"); } }
   },
   Components: {
     utils: {
       cloneInto(value) { return value; },
       exportFunction(value) { return value; }
+    },
+    interfaces: {}
+  },
+  Services: {
+    scriptloader: { loadSubScript() {} },
+    prefs: {
+      getCharPref(_name, fallback) { return fallback; },
+      setCharPref() {}
+    },
+    logins: {
+      async searchLoginsAsync() { return []; }
     }
   },
-  Services: { scriptloader: { loadSubScript() {} } },
   APP_SHUTDOWN: "shutdown"
 };
 context.globalThis = context;
@@ -38,12 +49,94 @@ vm.runInContext(bootstrap, context, { filename: bootstrapPath });
 vm.runInContext(fs.readFileSync(path.resolve(
   __dirname, "..", "zotero-reader-selection-replacer-test", "content-segments.js"
 ), "utf8"), context, { filename: "content-segments.js" });
+vm.runInContext(fs.readFileSync(path.resolve(
+  __dirname, "..", "zotero-reader-selection-replacer-test", "translation-service.js"
+), "utf8"), context, { filename: "translation-service.js" });
 
 const matcher = context.SelectionMatcher;
 const splitReplacement = context.splitReplacement;
 const replacerTest = context.SelectionReplacerTest;
 const locator = context.ReaderTargetLocator;
 const overlay = context.SelectionReplacerOverlay;
+
+{
+  assert.strictEqual(replacerTest.registeredPaneID, null);
+  assert.ok(replacerTest.registerItemPane);
+  assert.ok(replacerTest.renderItemPane);
+  assert.ok(replacerTest.retryFrontMatter);
+  let paneOptions = null;
+  context.Zotero.ItemPaneManager = {
+    registerSection(options) {
+      paneOptions = options;
+      return "reader-selection-replacer-test-pane";
+    }
+  };
+  replacerTest.registerItemPane();
+ assert.strictEqual(paneOptions.paneID, "reader-selection-replacer-test-pane");
+ assert.strictEqual(paneOptions.pluginID, "reader-selection-replacer-test@local.kumiko");
+  assert.strictEqual(paneOptions.header.l10nID, "reader-selection-replacer-test-pane-header");
+  assert.strictEqual(paneOptions.sidenav.l10nID, "reader-selection-replacer-test-pane-sidenav");
+ assert.strictEqual(paneOptions.header.icon, "icons/translator-for-zotero-16.svg");
+ assert.strictEqual(paneOptions.sidenav.icon, "icons/translator-for-zotero-20.svg");
+ let enabled = null;
+  paneOptions.onItemChange({ item: {}, tabType: "reader", setEnabled(value) {
+    enabled = value;
+  } });
+  assert.strictEqual(enabled, true);
+  replacerTest.registeredPaneID = null;
+  delete context.Zotero.ItemPaneManager;
+  const appended = [];
+  const toolbarDoc = {
+    getElementById() { return null; },
+    createElement() { throw new Error("renderToolbar must not create controls"); }
+  };
+  const toolbarReader = {};
+  replacerTest.startingReaders.add(toolbarReader);
+  replacerTest.onRenderToolbar({ reader: toolbarReader, doc: toolbarDoc,
+    append() { appended.push(true); } });
+  replacerTest.startingReaders.delete(toolbarReader);
+  assert.strictEqual(appended.length, 0);
+}
+
+{
+  const makeElement = tagName => ({
+    tagName: tagName.toUpperCase(),
+    children: [],
+    style: {},
+    dataset: {},
+    textContent: "",
+    value: "",
+    isConnected: true,
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    setAttribute(name, value) { this[name] = value; },
+    addEventListener(name, handler) { this["on" + name] = handler; }
+  });
+  const doc = {
+    createElement(tagName) {
+      const element = makeElement(tagName);
+      element.ownerDocument = doc;
+      return element;
+    }
+  };
+  const body = makeElement("body");
+  replacerTest.panelStates.clear();
+  replacerTest.providerStates.clear();
+  replacerTest.activeProviderID = "deepseek";
+ replacerTest.renderItemPane({ doc, body, item: { id: 1 }, tabType: "reader" });
+const panel = [...replacerTest.panelStates][0];
+assert.ok(panel);
+ assert.strictEqual(panel.providerButtons.children.length, 2);
+  assert.strictEqual(panel.qwenButton.textContent, "千问");
+  assert.strictEqual(panel.deepSeekButton.textContent, "deepseek");
+  assert.strictEqual(panel.apiInput.type, "password");
+  assert.strictEqual(panel.saveKey.textContent, "保存");
+  assert.strictEqual(panel.resetKey.textContent, "重置");
+  assert.strictEqual(replacerTest.maskAPIKey("deepseek-secret"), "deep***cret");
+  panel.qwenButton.onclick();
+  assert.strictEqual(replacerTest.activeProviderID, "qwen-mt");
+  assert.strictEqual(panel.providerID, "qwen-mt");
+}
 
 function makeFixture(paragraphLineCounts) {
   const chars = [];
@@ -656,6 +749,23 @@ assert.strictEqual(
 }
 
 {
+  const root = { style: {} };
+  const textNode = { style: {}, textContent: "原论文文字" };
+  const badge = { style: {} };
+  overlay.applyTranslationDisplay(root, textNode, badge, true, "#ffffff");
+  assert.strictEqual(root.style.background, "transparent");
+  assert.strictEqual(textNode.textContent, "");
+  assert.strictEqual(textNode.style.display, "none");
+  assert.strictEqual(textNode.style.visibility, "hidden");
+  assert.strictEqual(badge.style.display, "none");
+  overlay.applyTranslationDisplay(root, textNode, badge, false, "#ffffff");
+  assert.strictEqual(root.style.background, "#ffffff");
+  assert.strictEqual(textNode.style.display, "");
+  assert.strictEqual(textNode.style.visibility, "visible");
+  assert.strictEqual(badge.style.display, "");
+}
+
+{
   const abstractSuccess = overlay.translationDecoration("abstract", "success");
   assert.strictEqual(abstractSuccess.border, "none");
   assert.strictEqual(abstractSuccess.showBadge, false);
@@ -737,6 +847,12 @@ assert.strictEqual(
   assert.strictEqual(appended[0].children.length, 2);
   assert.strictEqual(appended[0].children[0].textContent, "翻译");
   assert.match(appended[0].children[0].title, /翻译/u);
+  assert.strictEqual(appended[0].style.flexDirection, "column");
+  assert.strictEqual(appended[0].style.alignItems, "center");
+  assert.strictEqual(appended[0].children[0].style.margin, "0 auto");
+  assert.strictEqual(appended[0].children[0].style.borderRadius, "12px");
+  assert.strictEqual(appended[0].children[0].style.maxWidth, "280px");
+  assert.strictEqual(appended[0].children[0].style.height, "64px");
 }
 
 console.log("selection replacer bootstrap tests passed");

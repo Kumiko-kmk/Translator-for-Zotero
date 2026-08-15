@@ -1,0 +1,9 @@
+reader-selection-replacer-test-pane-header =
+    .label = Translator for Zotero
+reader-selection-replacer-test-pane-sidenav =
+    .label = Translator for Zotero
+    .tooltiptext = Translator for Zotero
+reader-selection-replacer-test-pane-provider-qwen = Qwen
+reader-selection-replacer-test-pane-provider-deepseek = deepseek
+reader-selection-replacer-test-pane-reset = Reset
+reader-selection-replacer-test-pane-save = Save

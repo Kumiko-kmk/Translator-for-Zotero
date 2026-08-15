@@ -1,9 +1,13 @@
 {
   "manifest_version": 2,
-  "name": "Paper Assistant Reader Selection Replacer Test",
-  "version": "0.4.13",
-  "description": "Automatically translate PDF front matter and user-selected paragraphs with reusable overlays.",
+  "name": "Translator for Zotero",
+  "version": "1.0.0",
+  "description": "Translate PDF front matter and user-selected paragraphs with Translator for Zotero.",
   "author": "Kumiko",
+  "icons": {
+    "16": "icons/translator-for-zotero.png",
+    "32": "icons/translator-for-zotero.png"
+  },
   "applications": {
     "zotero": {
       "id": "reader-selection-replacer-test@local.kumiko",

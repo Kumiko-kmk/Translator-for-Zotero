@@ -10,7 +10,8 @@ PLUGIN = ROOT / "zotero-reader-selection-replacer-test"
 def test_selection_replacer_manifest_is_independent() -> None:
     manifest = json.loads((PLUGIN / "manifest.json").read_text(encoding="utf-8"))
     zotero = manifest["applications"]["zotero"]
-    assert manifest["version"] == "0.4.13"
+    assert manifest["name"] == "Translator for Zotero"
+    assert manifest["version"] == "1.0.0"
     assert zotero["id"] == "reader-selection-replacer-test@local.kumiko"
     assert zotero["strict_min_version"] == "9.0"
     assert zotero["strict_max_version"] == "9.*"
@@ -18,8 +19,32 @@ def test_selection_replacer_manifest_is_independent() -> None:
 
 def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None:
     source = (PLUGIN / "bootstrap.js").read_text(encoding="utf-8")
+    translation_source = (PLUGIN / "translation-service.js").read_text(encoding="utf-8")
     assert '"renderTextSelectionPopup"' in source
     assert '"renderToolbar"' in source
+    assert "registerSection" in source
+    assert "reader-selection-replacer-test-pane" in source
+    assert "renderItemPane" in source
+    assert "saveAPIKeyFromPanel" in source
+    assert "retryFrontMatter" in source
+    assert "TranslationModelRegistry" in translation_source
+    assert "TranslationProviderRegistry" in translation_source
+    assert "QwenCredentials" in translation_source
+    assert "activeTranslationProvider" in translation_source
+    assert "QwenMTPlusTranslationClient" in translation_source
+    assert "QWEN_MT_PLUS_MODEL" in translation_source
+    assert '"qwen-mt-plus"' in translation_source
+    assert "translation_options" in translation_source
+    assert "requestOptions" in translation_source
+    assert "maskAPIKey" in source
+    assert "reader-selection-replacer-test-pane-provider-qwen" in source
+    assert "reader-selection-replacer-test-pane-provider-deepseek" in source
+    assert "insertFTLIfNeeded" in source
+    assert "PANEL_LOCALE_FILE" in source
+    assert "QWEN_MT_BASE_URL" in translation_source
+    assert '"https://dashscope.aliyuncs.com/compatible-mode/v1"' in translation_source
+    assert "qwenMTEndpoint" not in translation_source
+    assert "待配置 Qwen-MT API endpoint" not in source
     assert "annotation?.text" in source
     assert "annotation?.position" in source
     assert "getSelectionPosition" in source
@@ -66,7 +91,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "diagnostic" in source
     assert "标题" in source
     assert "摘要" in source
-    assert "0.4.13" in source
+    assert "1.0.0" in source
     assert "PARAGRAPH_TRANSLATION_INDENT" in source
     assert "records: new Map()" in source
     assert "removeRecord" in source
@@ -92,7 +117,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
 
 
 def test_selection_replacer_xpi_contents() -> None:
-    xpi = ROOT / "dist" / "reader-selection-replacer-test-0.4.13.xpi"
+    xpi = ROOT / "dist" / "Translator-for-Zotero-1.0.0.xpi"
     if not xpi.exists():
         return
     with zipfile.ZipFile(xpi) as archive:
@@ -103,9 +128,16 @@ def test_selection_replacer_xpi_contents() -> None:
             "page-data-body-extractor.js",
             "content-segments.js",
             "translation-service.js",
+            "icons/paper-assistant-16.svg",
+            "icons/paper-assistant-20.svg",
+            "icons/translator-for-zotero-16.svg",
+            "icons/translator-for-zotero-20.svg",
+            "icons/translator-for-zotero.png",
+            "locale/en-US/reader-selection-replacer-test.ftl",
+            "locale/zh-CN/reader-selection-replacer-test.ftl",
         }
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["version"] == "0.4.13"
+        assert manifest["version"] == "1.0.0"
         assert archive.read("bootstrap.js") == (PLUGIN / "bootstrap.js").read_bytes()
         assert archive.read("page-data-body-extractor.js") == (
             PLUGIN / "page-data-body-extractor.js"
@@ -113,4 +145,25 @@ def test_selection_replacer_xpi_contents() -> None:
         assert archive.read("content-segments.js") == (PLUGIN / "content-segments.js").read_bytes()
         assert archive.read("translation-service.js") == (
             PLUGIN / "translation-service.js"
+        ).read_bytes()
+        assert archive.read("icons/paper-assistant-16.svg") == (
+            PLUGIN / "icons" / "paper-assistant-16.svg"
+        ).read_bytes()
+        assert archive.read("icons/paper-assistant-20.svg") == (
+            PLUGIN / "icons" / "paper-assistant-20.svg"
+        ).read_bytes()
+        assert archive.read("icons/translator-for-zotero.png") == (
+            PLUGIN / "icons" / "translator-for-zotero.png"
+        ).read_bytes()
+        assert archive.read("icons/translator-for-zotero-16.svg") == (
+            PLUGIN / "icons" / "translator-for-zotero-16.svg"
+        ).read_bytes()
+        assert archive.read("icons/translator-for-zotero-20.svg") == (
+            PLUGIN / "icons" / "translator-for-zotero-20.svg"
+        ).read_bytes()
+        assert archive.read("locale/en-US/reader-selection-replacer-test.ftl") == (
+            PLUGIN / "locale" / "en-US" / "reader-selection-replacer-test.ftl"
+        ).read_bytes()
+        assert archive.read("locale/zh-CN/reader-selection-replacer-test.ftl") == (
+            PLUGIN / "locale" / "zh-CN" / "reader-selection-replacer-test.ftl"
         ).read_bytes()
