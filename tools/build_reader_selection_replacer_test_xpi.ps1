@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.1.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,9 +33,13 @@ try {
         "translation-service.js",
        "icons/paper-assistant-16.svg",
        "icons/paper-assistant-20.svg",
-        "icons/translator-for-zotero-16.svg",
-        "icons/translator-for-zotero-20.svg",
+       "icons/translator-for-zotero-16.svg",
+       "icons/translator-for-zotero-20.svg",
        "icons/translator-for-zotero.png",
+       "icons/qwen-symbol-32.png",
+       "icons/deepseek-symbol-32.png",
+       "docs/translation-workflow.png",
+       "docs/system-architecture.png",
         "locale/en-US/reader-selection-replacer-test.ftl",
         "locale/zh-CN/reader-selection-replacer-test.ftl"
     )) {
