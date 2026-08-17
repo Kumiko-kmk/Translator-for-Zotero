@@ -123,16 +123,65 @@ const overlay = context.SelectionReplacerOverlay;
   replacerTest.panelStates.clear();
   replacerTest.providerStates.clear();
   replacerTest.activeProviderID = "deepseek";
- replacerTest.renderItemPane({ doc, body, item: { id: 1 }, tabType: "reader" });
-const panel = [...replacerTest.panelStates][0];
-assert.ok(panel);
- assert.strictEqual(panel.providerButtons.children.length, 2);
-  assert.strictEqual(panel.qwenButton.textContent, "千问");
-  assert.strictEqual(panel.deepSeekButton.textContent, "deepseek");
+  replacerTest.renderItemPane({ doc, body, item: { id: 1 }, tabType: "reader" });
+  const panel = [...replacerTest.panelStates][0];
+  assert.ok(panel);
+  assert.strictEqual(panel.providerButtons.children.length, 2);
+  const qwenContent = panel.qwenButton.children[0];
+  const deepSeekContent = panel.deepSeekButton.children[0];
+  assert.strictEqual(qwenContent.children[1].textContent, "千问");
+  assert.strictEqual(deepSeekContent.children[1].textContent, "deepseek");
+  const qwenLogo = qwenContent.children[0].children[0];
+  const qwenLogoFallback = qwenContent.children[0].children[1];
+  const deepSeekLogo = deepSeekContent.children[0].children[0];
+  assert.strictEqual(qwenLogo.src, "icons/qwen-symbol-32.png");
+  assert.strictEqual(deepSeekLogo.src, "icons/deepseek-symbol-32.png");
+  assert.strictEqual(qwenLogo.style.borderRadius, "50%");
+  assert.strictEqual(deepSeekLogo.style.borderRadius, "50%");
+  assert.strictEqual(qwenLogo.style.width, "28px");
+  assert.strictEqual(deepSeekLogo.style.width, "28px");
+  assert.strictEqual(qwenLogo.style.height, "28px");
+  assert.strictEqual(deepSeekLogo.style.height, "28px");
+  assert.strictEqual(qwenLogo.style.flex, "0 0 28px");
+  assert.strictEqual(deepSeekLogo.style.flex, "0 0 28px");
+  assert.strictEqual(qwenLogo.style.objectFit, "cover");
+  assert.strictEqual(deepSeekLogo.style.objectFit, "cover");
+  assert.strictEqual(qwenLogo.style.padding, "0");
+  assert.strictEqual(deepSeekLogo.style.padding, "0");
+  assert.strictEqual(qwenLogo.style.overflow, "hidden");
+  assert.strictEqual(deepSeekLogo.style.overflow, "hidden");
+  assert.strictEqual(panel.qwenButton.style.flex, "1 1 50%");
+  assert.strictEqual(panel.deepSeekButton.style.flex, "1 1 50%");
+  assert.strictEqual(panel.qwenButton.style.justifyContent, "center");
+  assert.strictEqual(panel.deepSeekButton.style.justifyContent, "center");
+  qwenLogo.onerror();
+  assert.strictEqual(qwenLogo.style.display, "none");
+  assert.strictEqual(qwenLogoFallback.style.display, "inline-flex");
   assert.strictEqual(panel.apiInput.type, "password");
+  assert.strictEqual(panel.apiInput.readOnly, false);
   assert.strictEqual(panel.saveKey.textContent, "保存");
   assert.strictEqual(panel.resetKey.textContent, "重置");
-  assert.strictEqual(replacerTest.maskAPIKey("deepseek-secret"), "deep***cret");
+  assert.strictEqual(replacerTest.maskAPIKey("deepseek-secret"), "deep********ret");
+  assert.strictEqual(panel.container.children.length, 3);
+  assert.strictEqual("message" in panel, false);
+  assert.strictEqual(panel.statusRow.children.length, 3);
+
+  panel.savedKey = "sk-example-secret-f2c";
+  panel.inputDirty = false;
+  replacerTest.updatePanelState(panel);
+  assert.strictEqual(panel.apiInput.readOnly, true);
+  assert.strictEqual(panel.apiInput.type, "text");
+  assert.strictEqual(panel.apiInput.value, replacerTest.maskAPIKey(panel.savedKey));
+  assert.strictEqual(panel.apiInput.value.includes(panel.savedKey), false);
+  assert.strictEqual(panel.apiInput.style.textAlign, "center");
+  assert.strictEqual(panel.apiInput.style.color, "var(--fill-secondary, #9ca3af)");
+
+  panel.savedKey = "";
+  panel.inputDirty = false;
+  replacerTest.updatePanelState(panel);
+  assert.strictEqual(panel.apiInput.readOnly, false);
+  assert.strictEqual(panel.apiInput.type, "password");
+  assert.strictEqual(panel.apiInput.value, "");
   panel.qwenButton.onclick();
   assert.strictEqual(replacerTest.activeProviderID, "qwen-mt");
   assert.strictEqual(panel.providerID, "qwen-mt");
@@ -850,9 +899,273 @@ assert.strictEqual(
   assert.strictEqual(appended[0].style.flexDirection, "column");
   assert.strictEqual(appended[0].style.alignItems, "center");
   assert.strictEqual(appended[0].children[0].style.margin, "0 auto");
-  assert.strictEqual(appended[0].children[0].style.borderRadius, "12px");
-  assert.strictEqual(appended[0].children[0].style.maxWidth, "280px");
-  assert.strictEqual(appended[0].children[0].style.height, "64px");
+  assert.strictEqual(appended[0].children[0].style.borderRadius, "8px");
+  assert.strictEqual(appended[0].children[0].style.maxWidth, "220px");
+  assert.strictEqual(appended[0].children[0].style.width, "calc(100% - 64px)");
+  assert.strictEqual(appended[0].children[0].style.height, "42px");
+  assert.strictEqual(appended[0].children[0].style.minHeight, "42px");
+  assert.strictEqual(appended[0].children[0].style.maxHeight, "42px");
+  assert.strictEqual(appended[0].children[0].style.padding, "2px 10px");
+  assert.strictEqual(appended[0].children[0].style.border,
+    "1px solid var(--fill-quinary, rgba(255,255,255,.28))");
+  assert.strictEqual(appended[0].children[0].style.fontSize, "14px");
+}
+
+{
+  const realSetTimeout = context.setTimeout;
+  const realClearTimeout = context.clearTimeout;
+  const realNow = overlay.now;
+  const realSchedule = overlay.schedule;
+  const realEnsureLayer = overlay.ensureLayer;
+  const realPageColors = overlay.pageColors;
+  const realFitSelectionText = overlay.fitSelectionText;
+  let clock = 0;
+  let nextTimerID = 0;
+  const timers = new Map();
+  context.setTimeout = (callback, delay) => {
+    const id = ++nextTimerID;
+    timers.set(id, { callback, due: clock + Math.max(0, Number(delay) || 0) });
+    return id;
+  };
+  context.clearTimeout = id => timers.delete(id);
+  overlay.now = () => clock;
+  overlay.schedule = () => {};
+
+  const makeElement = tagName => ({
+    tagName: tagName.toUpperCase(),
+    children: [],
+    ownerDocument: null,
+    parentNode: null,
+    style: {},
+    dataset: {},
+    textContent: "",
+    isConnected: true,
+    append(...children) {
+      for (const child of children) {
+        if (!child) continue;
+        child.parentNode = this;
+        this.children.push(child);
+      }
+    },
+    replaceChildren(...children) {
+      for (const child of this.children) child.parentNode = null;
+      this.children = [];
+      this.append(...children);
+    },
+    remove() {
+      if (this.parentNode) {
+        this.parentNode.children = this.parentNode.children.filter(child => child !== this);
+        this.parentNode = null;
+      }
+      this.isConnected = false;
+    },
+    addEventListener(name, handler) { this["on" + name] = handler; },
+    setAttribute(name, value) { this[name] = value; }
+  });
+  const doc = {
+    createElement(tagName) {
+      const element = makeElement(tagName);
+      element.ownerDocument = doc;
+      return element;
+    }
+  };
+  const layer = makeElement("div");
+  layer.ownerDocument = doc;
+  const state = {
+    cancelled: false,
+    view: {},
+    records: new Map(),
+    failureTimers: new Map(),
+    overlayLayers: new Map(),
+    eventHandlers: [],
+    renderTimer: null,
+    settleTimer: null,
+    poller: null
+  };
+  overlay.ensureLayer = () => layer;
+  overlay.pageColors = () => ({ background: "#ffffff", foreground: "#111111" });
+  overlay.fitSelectionText = ({ node, translatedText }) => {
+    node.textContent = translatedText;
+    return {
+      rendered: true, layoutMode: "selection", lines: [translatedText],
+      fontSize: 12, lineHeight: 1.2, sourceRectCount: 1, mergedRectCount: 1,
+      failureReason: ""
+    };
+  };
+
+  const makeRecord = (recordID, translationPending = false) => ({
+    recordID,
+    translationPending,
+    displayModes: new Map(),
+    failureCountdowns: new Map()
+  });
+  const part = {
+    pageIndex: 0,
+    rect: [0, 0, 200, 40],
+    sourceRects: [[0, 0, 200, 40]]
+  };
+  const paragraph = { matchType: "paragraph", selectedText: "source paragraph" };
+  const renderSelection = (record, segmentID, translation = null, translatedText = "") =>
+    overlay.renderTranslatedSelectionTarget(
+      state, part, paragraph, { id: segmentID }, 0, 0, 0,
+      translation, translatedText, record);
+  const renderAuto = (record, kind, targetIndex, translation = null, translatedText = "") =>
+    overlay.renderTranslatedTarget(
+      state, part, { kind }, targetIndex, 0, translatedText, translation, record);
+  const runDueTimers = () => {
+    let ran;
+    do {
+      ran = false;
+      for (const [id, timer] of [...timers]) {
+        if (timer.due > clock) continue;
+        timers.delete(id);
+        timer.callback();
+        ran = true;
+      }
+    } while (ran);
+  };
+  const visibleText = () => layer.children[0]?.children[0]?.textContent || "";
+  const resetState = () => {
+    for (const record of state.records.values()) overlay.clearFailureCountdowns(state, record);
+    state.records.clear();
+    layer.replaceChildren();
+    clock = 0;
+  };
+
+  try {
+    const failedRecord = makeRecord("selection-failure");
+    state.records.set(failedRecord.recordID, failedRecord);
+    const failed = { status: "failed", errorCode: "http-500" };
+    let result = renderSelection(failedRecord, "failed", failed);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（5S）");
+    assert.strictEqual(failedRecord.failureCountdowns.size, 1);
+
+    clock = 1000;
+    runDueTimers();
+    layer.replaceChildren();
+    result = renderSelection(failedRecord, "failed", failed);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（4S）");
+
+    clock = 5000;
+    runDueTimers();
+    layer.replaceChildren();
+    result = renderSelection(failedRecord, "failed", failed);
+    assert.strictEqual(result.rendered, false);
+    assert.strictEqual(layer.children.length, 0);
+
+    resetState();
+    const terminalRecord = makeRecord("terminal-states");
+    state.records.set(terminalRecord.recordID, terminalRecord);
+    for (const [segmentID, translation] of [
+      ["skipped", { status: "skipped" }],
+      ["missing", null]
+    ]) {
+      layer.replaceChildren();
+      result = renderSelection(terminalRecord, segmentID, translation);
+      assert.strictEqual(result.rendered, true);
+      assert.strictEqual(visibleText(), "翻译失败，请手动重试（5S）");
+    }
+
+    const pendingRecord = makeRecord("pending", true);
+    state.records.set(pendingRecord.recordID, pendingRecord);
+    layer.replaceChildren();
+    result = renderSelection(pendingRecord, "pending", null);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "正在翻译…");
+    assert.strictEqual(pendingRecord.failureCountdowns.size, 0);
+
+    const successRecord = makeRecord("success");
+    state.records.set(successRecord.recordID, successRecord);
+    layer.replaceChildren();
+    result = renderSelection(successRecord, "success", { status: "translated" }, "译文");
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "译文");
+    assert.strictEqual(successRecord.failureCountdowns.size, 0);
+
+    const layoutRecord = makeRecord("layout-failure");
+    state.records.set(layoutRecord.recordID, layoutRecord);
+    overlay.fitSelectionText = () => ({
+      rendered: false, layoutMode: "selection", lines: [], fontSize: 0, lineHeight: 0,
+      sourceRectCount: 1, mergedRectCount: 1, failureReason: "layout-overflow"
+    });
+    layer.replaceChildren();
+    result = renderSelection(layoutRecord, "layout", { status: "translated" }, "过长译文");
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（5S）");
+    overlay.fitSelectionText = realFitSelectionText;
+
+    const autoRecord = makeRecord("front-matter");
+    state.records.set(autoRecord.recordID, autoRecord);
+    const autoPendingRecord = makeRecord("front-matter-pending", true);
+    state.records.set(autoPendingRecord.recordID, autoPendingRecord);
+    layer.replaceChildren();
+    result = renderAuto(autoPendingRecord, "title", 2);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "正在翻译…");
+    assert.strictEqual(autoPendingRecord.failureCountdowns.size, 0);
+    layer.replaceChildren();
+    result = renderAuto(autoRecord, "title", 0, failed);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（5S）");
+    layer.replaceChildren();
+    result = renderAuto(autoRecord, "abstract", 1, { status: "skipped" });
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（5S）");
+
+    resetState();
+    const independentRecord = makeRecord("independent");
+    state.records.set(independentRecord.recordID, independentRecord);
+    layer.replaceChildren();
+    renderSelection(independentRecord, "first", failed);
+    clock = 2000;
+    renderSelection(independentRecord, "second", failed);
+    clock = 5000;
+    runDueTimers();
+    layer.replaceChildren();
+    const firstResult = renderSelection(independentRecord, "first", failed);
+    const secondResult = renderSelection(independentRecord, "second", failed);
+    assert.strictEqual(firstResult.rendered, false);
+    assert.strictEqual(secondResult.rendered, true);
+    assert.strictEqual(layer.children.length, 1);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（2S）");
+
+    resetState();
+    const retryRecord = makeRecord("retry");
+    state.records.set(retryRecord.recordID, retryRecord);
+    renderSelection(retryRecord, "retry", failed);
+    clock = 2000;
+    overlay.clearFailureCountdowns(state, retryRecord);
+    retryRecord.failureCountdowns = new Map();
+    layer.replaceChildren();
+    renderSelection(retryRecord, "retry", failed);
+    clock = 5000;
+    runDueTimers();
+    layer.replaceChildren();
+    result = renderSelection(retryRecord, "retry", failed);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "翻译失败，请手动重试（2S）");
+
+    const cleanupReader = {};
+    state.records.set("cleanup", makeRecord("cleanup"));
+    renderSelection(state.records.get("cleanup"), "cleanup", failed);
+    overlay.states.set(cleanupReader, state);
+    assert.ok(state.failureTimers.size > 0);
+    overlay.remove(cleanupReader);
+    assert.strictEqual(state.failureTimers.size, 0);
+    assert.strictEqual(overlay.states.has(cleanupReader), false);
+  }
+  finally {
+    overlay.ensureLayer = realEnsureLayer;
+    overlay.pageColors = realPageColors;
+    overlay.fitSelectionText = realFitSelectionText;
+    overlay.now = realNow;
+    overlay.schedule = realSchedule;
+    context.setTimeout = realSetTimeout;
+    context.clearTimeout = realClearTimeout;
+    timers.clear();
+  }
 }
 
 console.log("selection replacer bootstrap tests passed");

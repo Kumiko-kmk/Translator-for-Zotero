@@ -11,7 +11,7 @@ def test_selection_replacer_manifest_is_independent() -> None:
     manifest = json.loads((PLUGIN / "manifest.json").read_text(encoding="utf-8"))
     zotero = manifest["applications"]["zotero"]
     assert manifest["name"] == "Translator for Zotero"
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.1.0"
     assert zotero["id"] == "reader-selection-replacer-test@local.kumiko"
     assert zotero["strict_min_version"] == "9.0"
     assert zotero["strict_max_version"] == "9.*"
@@ -34,11 +34,21 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "QwenMTPlusTranslationClient" in translation_source
     assert "QWEN_MT_PLUS_MODEL" in translation_source
     assert '"qwen-mt-plus"' in translation_source
+    assert "VALIDATION_REQUEST_TIMEOUT = 5000" in translation_source
+    assert "TRANSLATION_REQUEST_TIMEOUT = 10000" in translation_source
+    assert "NETWORK_RETRY_DELAYS = []" in translation_source
+    assert "CONTENT_RETRY_DELAYS = []" in translation_source
     assert "translation_options" in translation_source
     assert "requestOptions" in translation_source
     assert "maskAPIKey" in source
     assert "reader-selection-replacer-test-pane-provider-qwen" in source
     assert "reader-selection-replacer-test-pane-provider-deepseek" in source
+    assert "icons/qwen-symbol-32.png" in source
+    assert "icons/deepseek-symbol-32.png" in source
+    assert "icons/qwen-20.png" not in source
+    assert "icons/deepseek-20.png" not in source
+    assert "makeProviderLogo" in source
+    assert "message" not in source[source.index("  renderItemPane({"):source.index("  async selectProviderForPanels")]
     assert "insertFTLIfNeeded" in source
     assert "PANEL_LOCALE_FILE" in source
     assert "QWEN_MT_BASE_URL" in translation_source
@@ -91,7 +101,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "diagnostic" in source
     assert "标题" in source
     assert "摘要" in source
-    assert "1.0.0" in source
+    assert 'PLUGIN_VERSION = "1.1.0"' in source
     assert "PARAGRAPH_TRANSLATION_INDENT" in source
     assert "records: new Map()" in source
     assert "removeRecord" in source
@@ -117,7 +127,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
 
 
 def test_selection_replacer_xpi_contents() -> None:
-    xpi = ROOT / "dist" / "Translator-for-Zotero-1.0.0.xpi"
+    xpi = ROOT / "dist" / "Translator-for-Zotero-1.1.0.xpi"
     if not xpi.exists():
         return
     with zipfile.ZipFile(xpi) as archive:
@@ -133,11 +143,15 @@ def test_selection_replacer_xpi_contents() -> None:
             "icons/translator-for-zotero-16.svg",
             "icons/translator-for-zotero-20.svg",
             "icons/translator-for-zotero.png",
+            "icons/qwen-symbol-32.png",
+            "icons/deepseek-symbol-32.png",
+            "docs/translation-workflow.png",
+            "docs/system-architecture.png",
             "locale/en-US/reader-selection-replacer-test.ftl",
             "locale/zh-CN/reader-selection-replacer-test.ftl",
         }
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["version"] == "1.0.0"
+        assert manifest["version"] == "1.1.0"
         assert archive.read("bootstrap.js") == (PLUGIN / "bootstrap.js").read_bytes()
         assert archive.read("page-data-body-extractor.js") == (
             PLUGIN / "page-data-body-extractor.js"
@@ -160,6 +174,18 @@ def test_selection_replacer_xpi_contents() -> None:
         ).read_bytes()
         assert archive.read("icons/translator-for-zotero-20.svg") == (
             PLUGIN / "icons" / "translator-for-zotero-20.svg"
+        ).read_bytes()
+        assert archive.read("icons/qwen-symbol-32.png") == (
+            PLUGIN / "icons" / "qwen-symbol-32.png"
+        ).read_bytes()
+        assert archive.read("icons/deepseek-symbol-32.png") == (
+            PLUGIN / "icons" / "deepseek-symbol-32.png"
+        ).read_bytes()
+        assert archive.read("docs/translation-workflow.png") == (
+            PLUGIN / "docs" / "translation-workflow.png"
+        ).read_bytes()
+        assert archive.read("docs/system-architecture.png") == (
+            PLUGIN / "docs" / "system-architecture.png"
         ).read_bytes()
         assert archive.read("locale/en-US/reader-selection-replacer-test.ftl") == (
             PLUGIN / "locale" / "en-US" / "reader-selection-replacer-test.ftl"

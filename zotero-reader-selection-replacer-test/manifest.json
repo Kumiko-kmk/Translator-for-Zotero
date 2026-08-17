@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Translator for Zotero",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Translate PDF front matter and user-selected paragraphs with Translator for Zotero.",
   "author": "Kumiko",
   "icons": {

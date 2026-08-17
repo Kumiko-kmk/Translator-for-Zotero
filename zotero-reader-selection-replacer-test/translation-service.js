@@ -19,8 +19,12 @@ const SELECTION_TRANSLATION_PROMPT_VERSION = "selection-translation-v1";
 const TITLE_BREAK_MARKER = "<br>";
 const TRANSLATION_CACHE_FILE = "paper-assistant-segment-translations.sqlite";
 const API_KEY_PROMPTED_PREF = "extensions.reader-selection-replacer.apiKeyPrompted";
-const NETWORK_RETRY_DELAYS = [1000, 3000, 8000];
-const CONTENT_RETRY_DELAYS = [500, 1500];
+// Keep failures observable during setup and manual troubleshooting. A request
+// that cannot reach the selected provider should not occupy the pane for minutes.
+const VALIDATION_REQUEST_TIMEOUT = 5000;
+const TRANSLATION_REQUEST_TIMEOUT = 10000;
+const NETWORK_RETRY_DELAYS = [];
+const CONTENT_RETRY_DELAYS = [];
 const QWEN_MT_LANGUAGE_NAMES = Object.freeze({
   auto: "auto",
   en: "English",
@@ -126,7 +130,7 @@ var DeepSeekCredentials = {
     const response = await Zotero.HTTP.request("GET", `${DEEPSEEK_BASE_URL}/models`, {
       headers: { Authorization: `Bearer ${apiKey.trim()}` },
       responseType: "json",
-      timeout: 20000,
+      timeout: VALIDATION_REQUEST_TIMEOUT,
       successCodes: false
     });
     const status = Number(response?.status || 0);
@@ -156,7 +160,12 @@ QwenCredentials.validateKey = async function(apiKey, options = {}) {
       sourceLanguage: "en"
     }],
     { cancelled: false },
-    { ...options, targetLanguage: "zh-CN" }
+    {
+      ...options,
+      targetLanguage: "zh-CN",
+      timeout: VALIDATION_REQUEST_TIMEOUT,
+      retryDelays: []
+    }
   );
   return true;
 };
@@ -392,7 +401,8 @@ var DeepSeekTranslationClient = {
       try {
         response = await Zotero.HTTP.request("POST", `${DEEPSEEK_BASE_URL}/chat/completions`, {
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify(payload), responseType: "json", timeout: 120000,
+          body: JSON.stringify(payload), responseType: "json",
+          timeout: TRANSLATION_REQUEST_TIMEOUT,
           successCodes: false, errorDelayMax: 0
         });
       }
@@ -407,6 +417,9 @@ var DeepSeekTranslationClient = {
       if (status >= 200 && status < 300) {
         const data = parseAPIResponse(response);
         return data?.choices?.[0]?.message?.content;
+      }
+      if (status === 401 || status === 403) {
+        throw Object.assign(new Error("API Key 无效"), { status });
       }
       const error = Object.assign(new Error(`DeepSeek HTTP ${status || "unknown"}`), { status });
       if ((status === 429 || status >= 500) && attempt < NETWORK_RETRY_DELAYS.length) {
@@ -498,7 +511,12 @@ var QwenMTPlusTranslationClient = {
     }
     const endpoint = `${QWEN_MT_BASE_URL}/chat/completions`;
     const payload = this.buildPayload(segments[0], options);
-    for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS.length; attempt++) {
+    const retryDelays = Array.isArray(options?.retryDelays)
+      ? options.retryDelays : NETWORK_RETRY_DELAYS;
+    const requestedTimeout = Number(options?.timeout);
+    const timeout = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+      ? requestedTimeout : TRANSLATION_REQUEST_TIMEOUT;
+    for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
       if (session?.cancelled) throw new Error("翻译已取消");
       let response;
       try {
@@ -509,23 +527,26 @@ var QwenMTPlusTranslationClient = {
           },
           body: JSON.stringify(payload),
           responseType: "json",
-          timeout: 120000,
+          timeout,
           successCodes: false,
           errorDelayMax: 0
         });
       }
       catch (error) {
-        if (attempt < NETWORK_RETRY_DELAYS.length) {
-          await translationDelay(NETWORK_RETRY_DELAYS[attempt]);
+        if (attempt < retryDelays.length) {
+          await translationDelay(retryDelays[attempt]);
           continue;
         }
         throw error;
       }
       const status = Number(response?.status || 0);
       if (status >= 200 && status < 300) return this.extractText(response);
+      if (status === 401 || status === 403) {
+        throw Object.assign(new Error("API Key 无效"), { status });
+      }
       const error = Object.assign(new Error(`Qwen-MT HTTP ${status || "unknown"}`), { status });
-      if ((status === 429 || status >= 500) && attempt < NETWORK_RETRY_DELAYS.length) {
-        await translationDelay(NETWORK_RETRY_DELAYS[attempt]);
+      if ((status === 429 || status >= 500) && attempt < retryDelays.length) {
+        await translationDelay(retryDelays[attempt]);
         continue;
       }
       throw error;

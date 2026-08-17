@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "1.0.0";
+const PLUGIN_VERSION = "1.1.0";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const PANE_ID = "reader-selection-replacer-test-pane";
 const PANEL_LOCALE_FILE = "reader-selection-replacer-test.ftl";
@@ -12,6 +12,8 @@ const LEGACY_TOOLBAR_IDS = Object.freeze([
 ]);
 const LAYER_CLASS = "reader-selection-replacer-test-layer";
 const PARAGRAPH_TRANSLATION_INDENT = "　　";
+const TRANSLATION_FAILURE_COUNTDOWN_SECONDS = 5;
+const TRANSLATION_FAILURE_MESSAGE = "翻译失败，请手动重试";
 const PARAGRAPH_MARK_COLORS = [
   "#0ea5e9", "#f97316", "#22c55e", "#a855f7", "#eab308", "#ec4899"
 ];
@@ -1860,6 +1862,7 @@ var SelectionReplacerOverlay = {
         nextSequence: 0,
         cancelled: false,
         overlayLayers: new Map(),
+        failureTimers: new Map(),
         eventHandlers: [],
         renderTimer: null,
         settleTimer: null,
@@ -1888,6 +1891,7 @@ var SelectionReplacerOverlay = {
       (mode === "diagnostic" ? "front-matter" : mode === "selection-translation"
         ? `selection-${state.nextSequence + 1}` : "replacement"));
     const previous = state.records.get(recordID);
+    if (previous) this.clearFailureCountdowns(state, previous);
     state.records.set(recordID, {
       recordID,
       mode,
@@ -1897,6 +1901,7 @@ var SelectionReplacerOverlay = {
       segments: options.segments || [],
       translations: options.translations || new Map(),
       translationPending: Boolean(options.translationPending),
+      failureCountdowns: new Map(),
       replacement: String(options.replacement || ""),
       displayModes: previous?.displayModes || new Map(),
       sequence: previous?.sequence ?? state.nextSequence++
@@ -1908,9 +1913,97 @@ var SelectionReplacerOverlay = {
   removeRecord(reader, recordID) {
     const state = this.states.get(reader);
     if (!state || !recordID) return false;
-    const removed = state.records.delete(String(recordID));
+    const key = String(recordID);
+    const record = state.records.get(key);
+    if (record) this.clearFailureCountdowns(state, record);
+    const removed = state.records.delete(key);
     if (removed) this.schedule(state, 0);
     return removed;
+  },
+
+  now() {
+    return Date.now();
+  },
+
+  clearFailureTimer(state, timerKey) {
+    if (!state?.failureTimers || !timerKey) return;
+    const timer = state.failureTimers.get(timerKey);
+    if (timer !== undefined) clearTimeout(timer);
+    state.failureTimers.delete(timerKey);
+  },
+
+  clearFailureCountdowns(state, record) {
+    if (!record) return;
+    for (const countdown of record.failureCountdowns?.values?.() || []) {
+      this.clearFailureTimer(state, countdown.timerKey);
+    }
+    record.failureCountdowns?.clear?.();
+  },
+
+  scheduleFailureCountdown(state, record, displayKey, countdown) {
+    if (!state || state.cancelled || !record || !countdown) return;
+    this.clearFailureTimer(state, countdown.timerKey);
+    const delay = Math.max(1, Math.min(1000, countdown.expiresAt - this.now()));
+    const timer = setTimeout(() => {
+      const currentRecord = state.records.get(record.recordID);
+      const currentCountdown = currentRecord?.failureCountdowns?.get?.(displayKey);
+      if (state.cancelled || currentRecord !== record || currentCountdown !== countdown) return;
+      if (countdown.expiresAt <= this.now()) {
+        countdown.expired = true;
+        this.clearFailureTimer(state, countdown.timerKey);
+        this.schedule(state, 0);
+        return;
+      }
+      this.schedule(state, 0);
+      this.scheduleFailureCountdown(state, record, displayKey, countdown);
+    }, delay);
+    state.failureTimers.set(countdown.timerKey, timer);
+  },
+
+  getFailureCountdown(state, record, displayKey) {
+    if (!state || !record || !displayKey) return { active: false, expired: false };
+    if (!(record.failureCountdowns instanceof Map)) record.failureCountdowns = new Map();
+    let countdown = record.failureCountdowns.get(displayKey);
+    if (!countdown) {
+      countdown = {
+        timerKey: `${record.recordID}:${displayKey}`,
+        expiresAt: this.now() + TRANSLATION_FAILURE_COUNTDOWN_SECONDS * 1000,
+        expired: false
+      };
+      record.failureCountdowns.set(displayKey, countdown);
+      this.scheduleFailureCountdown(state, record, displayKey, countdown);
+    }
+    if (countdown.expired || countdown.expiresAt <= this.now()) {
+      countdown.expired = true;
+      this.clearFailureTimer(state, countdown.timerKey);
+      return { active: false, expired: true, remaining: 0, message: "" };
+    }
+    const remaining = Math.max(1, Math.ceil((countdown.expiresAt - this.now()) / 1000));
+    return {
+      active: true,
+      expired: false,
+      remaining,
+      message: `${TRANSLATION_FAILURE_MESSAGE}（${remaining}S）`
+    };
+  },
+
+  isFailureExpired(record, displayKey) {
+    return Boolean(record?.failureCountdowns?.get?.(displayKey)?.expired);
+  },
+
+  hiddenFailureResult(part, failureReason = "failure-countdown-expired") {
+    return {
+      rendered: false,
+      layoutMode: "failure-expired",
+      lines: [],
+      fontSize: 0,
+      lineHeight: 0,
+      breakSource: "none",
+      sourceRectCount: part?.sourceRects?.length || 0,
+      mergedRectCount: 1,
+      failureReason,
+      node: null
+    };
   },
 
   bindEvents(state) {
@@ -1940,6 +2033,9 @@ var SelectionReplacerOverlay = {
     if (state.renderTimer) clearTimeout(state.renderTimer);
     if (state.settleTimer) clearTimeout(state.settleTimer);
     if (state.poller) clearInterval(state.poller);
+    for (const record of state.records.values()) this.clearFailureCountdowns(state, record);
+    for (const timer of state.failureTimers.values()) clearTimeout(timer);
+    state.failureTimers.clear();
     const eventBus = state.view?._iframeWindow?.PDFViewerApplication?.eventBus;
     for (const [eventName, handler] of state.eventHandlers) {
       try { eventBus?.off?.(eventName, handler); }
@@ -2658,6 +2754,9 @@ var SelectionReplacerOverlay = {
 
   renderTranslatedTarget(state, part, target, targetIndex, partIndex, translatedText,
     translation = null, record = null) {
+    const displayKey = this.translationDisplayKey({ targetKind: target.kind,
+      targetIndex, partIndex });
+    if (this.isFailureExpired(record, displayKey)) return this.hiddenFailureResult(part);
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2668,6 +2767,8 @@ var SelectionReplacerOverlay = {
     const height = Math.max(1, bottom - top);
     const accent = AUTO_TARGET_COLORS[target.kind] || PARAGRAPH_MARK_COLORS[targetIndex];
     const colors = this.pageColors(state, part.pageIndex);
+    const translationPending = Boolean(record?.translationPending
+      && (!translation || ["failed", "skipped"].includes(translation.status)));
     const root = doc.createElement("div");
     root.className = "reader-selection-replacer-test-auto-part merged-translation";
     root.dataset.targetKind = target.kind;
@@ -2701,8 +2802,6 @@ var SelectionReplacerOverlay = {
     });
     root.append(textNode);
     layer.append(root);
-    const displayKey = this.translationDisplayKey({ targetKind: target.kind,
-      targetIndex, partIndex });
     let badge = null;
     const renderDisplay = showingOriginal => {
       this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
@@ -2714,7 +2813,11 @@ var SelectionReplacerOverlay = {
       }
       const displayText = translatedText;
       let displayFitted;
-      if (!displayText) {
+       if (translationPending) {
+         displayFitted = this.renderTranslationStatus(textNode, target.kind,
+           "正在翻译…", "pending");
+       }
+       else if (!displayText) {
         displayFitted = this.renderTranslationStatus(textNode, target.kind,
           target.kind === "title" ? "标题翻译失败" : "摘要翻译失败",
           translation?.errorCode || "missing-translation");
@@ -2754,9 +2857,21 @@ var SelectionReplacerOverlay = {
     const displayStatus = ["cached", "translated"].includes(translation?.status)
       && translatedText && !String(translationFitted.layoutMode || "").endsWith("-status")
       ? "success" : "failure";
+    const terminalFailure = !translationPending && displayStatus !== "success";
+    const failureCountdown = terminalFailure
+      ? this.getFailureCountdown(state, record, displayKey) : null;
+    if (failureCountdown?.expired) {
+      root.remove?.();
+      return this.hiddenFailureResult(part);
+    }
     const showingOriginal = Boolean(storedOriginal && displayStatus === "success");
     if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
-    const fitted = showingOriginal ? renderDisplay(true) : translationFitted;
+    let fitted = showingOriginal ? renderDisplay(true) : translationFitted;
+    if (failureCountdown?.active) {
+      fitted = this.renderTranslationStatus(textNode, target.kind,
+        failureCountdown.message,
+        translationFitted.failureReason || translation?.errorCode || "translation-failed");
+    }
     const decoration = this.translationDecoration(target.kind, displayStatus);
     root.style.border = decoration.border;
     root.dataset.translationDisplayStatus = displayStatus;
@@ -2778,6 +2893,9 @@ var SelectionReplacerOverlay = {
 
   renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
     partIndex, displayIndex, translation = null, translatedChunk = "", record = null) {
+    const displayKey = this.translationDisplayKey({ segmentID: segment?.id || "",
+      partIndex });
+    if (this.isFailureExpired(record, displayKey)) return this.hiddenFailureResult(part);
     const layer = this.ensureLayer(state, part.pageIndex);
     if (!layer) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
       lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
@@ -2793,6 +2911,8 @@ var SelectionReplacerOverlay = {
     const colors = this.pageColors(state, part.pageIndex);
     const translationSucceeded = ["cached", "translated"].includes(translation?.status);
     const translatedText = translationSucceeded ? String(translatedChunk || "") : "";
+    const translationPending = Boolean(record?.translationPending
+      && (!translation || ["failed", "skipped"].includes(translation.status)));
     const root = doc.createElement("div");
     root.className = "reader-selection-replacer-test-part merged-translation";
     root.dataset.paragraphIndex = String(paragraphIndex);
@@ -2826,8 +2946,6 @@ var SelectionReplacerOverlay = {
     const indentFirstBlock = partIndex === 0
       && Boolean(paragraph.translationIndentFirstBlock
         || segment?.metadata?.translationIndentFirstBlock);
-    const displayKey = this.translationDisplayKey({ segmentID: segment?.id || "",
-      partIndex });
     let badge = null;
     const renderDisplay = showingOriginal => {
       this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
@@ -2839,7 +2957,7 @@ var SelectionReplacerOverlay = {
       }
       const displayText = translatedText;
       let displayFitted;
-      if (record?.translationPending && !translation) {
+       if (translationPending) {
         displayFitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
       }
       else if (!translationSucceeded) {
@@ -2874,9 +2992,21 @@ var SelectionReplacerOverlay = {
     const displayStatus = translationSucceeded && translatedText
       && !String(translationFitted.layoutMode || "").endsWith("-status")
       ? "success" : "failure";
+    const terminalFailure = !translationPending && displayStatus !== "success";
+    const failureCountdown = terminalFailure
+      ? this.getFailureCountdown(state, record, displayKey) : null;
+    if (failureCountdown?.expired) {
+      root.remove?.();
+      return this.hiddenFailureResult(part);
+    }
     const showingOriginal = Boolean(storedOriginal && displayStatus === "success");
     if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
-    const fitted = showingOriginal ? renderDisplay(true) : translationFitted;
+    let fitted = showingOriginal ? renderDisplay(true) : translationFitted;
+    if (failureCountdown?.active) {
+      fitted = this.renderTranslationStatus(textNode, "selection",
+        failureCountdown.message,
+        translationFitted.failureReason || translation?.errorCode || "translation-failed");
+    }
     if (partIndex === 0) {
       badge = doc.createElement("span");
       badge.className = "reader-selection-replacer-test-paragraph-badge";
@@ -3267,9 +3397,8 @@ var SelectionReplacerTest = {
   },
 
   setPanelMessage(state, text, error = false) {
-    if (!state?.message) return;
-    state.message.textContent = String(text || "");
-    state.message.style.color = error ? "#c2410c" : "";
+    // The sidebar intentionally has no free-form log area. Keep this method as
+    // a compatibility no-op for the existing retry and legacy call sites.
   },
 
   async legacySaveAPIKeyFromPanel(state) {
@@ -3412,11 +3541,25 @@ var SelectionReplacerTest = {
     doc?.l10n?.setAttributes?.(element, l10nID);
   },
 
+  setPanelAttributes(element, l10nID, attributes, doc = element?.ownerDocument) {
+    if (!element) return;
+    element.setAttribute?.("data-l10n-id", l10nID);
+    element.setAttribute?.("data-l10n-attrs", Object.keys(attributes).join(","));
+    for (const [name, value] of Object.entries(attributes)) {
+      element.setAttribute?.(name, value);
+    }
+    doc?.l10n?.setAttributes?.(element, l10nID);
+  },
+
   maskAPIKey(apiKey) {
     const value = String(apiKey || "").trim();
     if (!value) return "";
-    if (value.length <= 6) return "***";
-    return value.slice(0, 4) + "***" + value.slice(-4);
+    if (value.length <= 7) return "*".repeat(value.length);
+    const prefixLength = 4;
+    const suffixLength = 3;
+    return value.slice(0, prefixLength)
+      + "*".repeat(value.length - prefixLength - suffixLength)
+      + value.slice(-suffixLength);
   },
 
   providerRequestOptions(provider) {
@@ -3434,8 +3577,14 @@ var SelectionReplacerTest = {
         return "验证成功 · " + (provider?.modelSpec?.model || provider?.label || "");
       case "validating":
         return "正在验证…";
-      case "invalid":
-        return "验证失败";
+      case "invalid": {
+        const message = String(state?.message || "").trim();
+        if (/API Key 无效|密钥无效/iu.test(message)) return "API Key 无效";
+        if (/timeout|timed out|超时/iu.test(message)) return "请求超时，请重试";
+        const httpStatus = message.match(/\bHTTP\s+(\d{3})\b/iu);
+        if (httpStatus) return `HTTP ${httpStatus[1]}`;
+        return message ? `验证失败：${message.slice(0, 80)}` : "验证失败";
+      }
       case "unknown":
         return "正在检查";
       case "missing":
@@ -3486,6 +3635,86 @@ var SelectionReplacerTest = {
     return button;
   },
 
+  makeProviderLogo(doc, providerID) {
+    const isQwen = providerID === "qwen-mt";
+    const image = doc.createElement("img");
+    const logoPath = isQwen
+      ? "icons/qwen-symbol-32.png"
+      : "icons/deepseek-symbol-32.png";
+    image.src = `${this.rootURI}${logoPath}`;
+    this.setPanelAttributes(
+      image,
+      isQwen
+        ? "reader-selection-replacer-test-pane-provider-qwen-icon"
+        : "reader-selection-replacer-test-pane-provider-deepseek-icon",
+      { alt: isQwen ? "千问图标" : "DeepSeek 图标" },
+      doc
+    );
+    image.setAttribute("aria-hidden", "true");
+    image.setAttribute("data-provider-logo", providerID);
+    this.stylePanel(image, {
+      display: "block",
+      width: "28px",
+      height: "28px",
+      borderRadius: "50%",
+      objectFit: "cover",
+      boxSizing: "border-box",
+      padding: "0",
+      overflow: "hidden",
+      background: "var(--fill-quaternary, rgba(255,255,255,.9))",
+      flex: "0 0 28px"
+    });
+
+    const fallback = doc.createElement("span");
+    fallback.textContent = isQwen ? "Q" : "D";
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.setAttribute("data-provider-logo-fallback", providerID);
+    this.stylePanel(fallback, {
+      display: "none",
+      alignItems: "center",
+      justifyContent: "center",
+      width: "28px",
+      height: "28px",
+      borderRadius: "50%",
+      flex: "0 0 28px",
+      color: "var(--fill-primary, inherit)",
+      background: "var(--material-button-hover, rgba(127,127,127,.22))",
+      fontSize: "13px",
+      fontWeight: "600"
+    });
+    image.addEventListener("error", () => {
+      image.style.display = "none";
+      fallback.style.display = "inline-flex";
+    });
+
+    const wrapper = doc.createElement("span");
+    this.stylePanel(wrapper, {
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: "28px",
+      height: "28px",
+      flex: "0 0 28px"
+    });
+    wrapper.append(image, fallback);
+    return wrapper;
+  },
+
+  makeProviderButtonContent(doc, providerID, l10nID, fallbackLabel) {
+    const content = doc.createElement("span");
+    this.stylePanel(content, {
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "8px",
+      whiteSpace: "nowrap"
+    });
+    const label = doc.createElement("span");
+    this.setPanelText(label, l10nID, fallbackLabel, doc);
+    content.append(this.makeProviderLogo(doc, providerID), label);
+    return content;
+  },
+
   renderItemPane({ doc, body, item, tabType }) {
     if (!doc || !body) return;
     for (const oldState of [...this.panelStates]) {
@@ -3497,7 +3726,7 @@ var SelectionReplacerTest = {
     this.stylePanel(container, {
       display: "flex",
       flexDirection: "column",
-      gap: "18px",
+      gap: "16px",
       padding: "18px 14px 20px",
       color: "var(--fill-primary, inherit)",
       fontSize: "14px",
@@ -3510,34 +3739,46 @@ var SelectionReplacerTest = {
     this.stylePanel(providerButtons, {
       display: "flex",
       width: "100%",
-      gap: "0"
+      gap: "0",
+      overflow: "hidden",
+      border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "8px",
+      background: "var(--material-sidepane, rgba(127,127,127,.06))"
     });
-    const qwenButton = this.makePanelButton(doc, "千问");
-    const deepSeekButton = this.makePanelButton(doc, "deepseek");
+    const qwenButton = this.makePanelButton(doc, "");
+    const deepSeekButton = this.makePanelButton(doc, "");
     qwenButton.dataset.provider = "qwen-mt";
     deepSeekButton.dataset.provider = "deepseek";
     qwenButton.setAttribute("aria-pressed", "false");
     deepSeekButton.setAttribute("aria-pressed", "false");
-    this.setPanelText(qwenButton,
-      "reader-selection-replacer-test-pane-provider-qwen", "千问", doc);
-    this.setPanelText(deepSeekButton,
-      "reader-selection-replacer-test-pane-provider-deepseek", "deepseek", doc);
+    qwenButton.append(this.makeProviderButtonContent(
+      doc, "qwen-mt", "reader-selection-replacer-test-pane-provider-qwen", "千问"
+    ));
+    deepSeekButton.append(this.makeProviderButtonContent(
+      doc, "deepseek", "reader-selection-replacer-test-pane-provider-deepseek", "deepseek"
+    ));
     this.stylePanel(qwenButton, {
-      flex: "1",
-      minHeight: "42px",
-      borderRadius: "4px 0 0 4px",
-      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      flex: "1 1 50%",
+      minHeight: "48px",
+      border: "0",
+      borderRight: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "0",
       background: "transparent",
-      fontSize: "15px"
+      fontSize: "16px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
     });
     this.stylePanel(deepSeekButton, {
-      flex: "1",
-      minHeight: "42px",
-      borderRadius: "0 4px 4px 0",
-      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
-      borderLeft: "0",
+      flex: "1 1 50%",
+      minHeight: "48px",
+      border: "0",
+      borderRadius: "0",
       background: "transparent",
-      fontSize: "15px"
+      fontSize: "16px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
     });
     providerButtons.append(qwenButton, deepSeekButton);
 
@@ -3545,30 +3786,34 @@ var SelectionReplacerTest = {
     this.stylePanel(inputSection, {
       display: "flex",
       flexDirection: "column",
-      gap: "7px"
+      gap: "9px"
     });
     const apiInput = doc.createElement("input");
     apiInput.type = "password";
+    apiInput.readOnly = false;
     apiInput.autocomplete = "new-password";
     apiInput.spellcheck = false;
     this.stylePanel(apiInput, {
       boxSizing: "border-box",
       width: "100%",
-      minHeight: "48px",
+      minHeight: "50px",
       padding: "8px 12px",
-      color: "inherit",
+      color: "var(--fill-secondary, #9ca3af)",
       background: "transparent",
-      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
-      borderRadius: "3px",
-      font: "inherit"
+      border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "8px",
+      font: "inherit",
+      textAlign: "center",
+      fontFamily: "monospace"
     });
     const statusRow = doc.createElement("div");
     this.stylePanel(statusRow, {
       display: "flex",
       alignItems: "center",
-      gap: "7px",
+      gap: "8px",
       minHeight: "24px",
-      color: "var(--fill-secondary, inherit)"
+      color: "var(--fill-secondary, inherit)",
+      padding: "0 3px"
     });
     const statusLamp = this.makeStatusLamp(doc);
     const apiStatus = doc.createElement("span");
@@ -3589,30 +3834,24 @@ var SelectionReplacerTest = {
     this.setPanelText(saveKey,
       "reader-selection-replacer-test-pane-save", "保存", doc);
     this.stylePanel(resetKey, {
-      flex: "0 1 42%",
-      minHeight: "42px",
-      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
-      borderRadius: "3px",
+      flex: "1 1 0",
+      minHeight: "46px",
+      border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "8px",
       background: "transparent",
-      fontSize: "15px"
+      fontSize: "16px"
     });
     this.stylePanel(saveKey, {
-      flex: "0 1 42%",
-      minHeight: "42px",
-      border: "2px solid var(--fill-quinary, rgba(0,0,0,.55))",
-      borderRadius: "3px",
+      flex: "1 1 0",
+      minHeight: "46px",
+      border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "8px",
       background: "transparent",
-      fontSize: "15px"
+      fontSize: "16px"
     });
     actions.append(resetKey, saveKey);
 
-    const message = doc.createElement("div");
-    this.stylePanel(message, {
-      minHeight: "18px",
-      lineHeight: "1.4",
-      color: "var(--fill-secondary, inherit)"
-    });
-    container.append(providerButtons, inputSection, actions, message);
+    container.append(providerButtons, inputSection, actions);
     body.append(container);
 
     const state = {
@@ -3631,7 +3870,6 @@ var SelectionReplacerTest = {
       retryValidation,
       resetKey,
       saveKey,
-      message,
       providerID: this.activeProviderID,
       savedKey: "",
       loadToken: 0
@@ -3643,6 +3881,7 @@ var SelectionReplacerTest = {
       this.selectProviderForPanels("deepseek"));
     apiInput.addEventListener("input", () => {
       state.inputDirty = true;
+      state.maskedPreview = false;
     });
     saveKey.addEventListener("click", () => this.saveAPIKeyFromPanel(state));
     resetKey.addEventListener("click", () => this.removeAPIKey(state));
@@ -3669,7 +3908,7 @@ var SelectionReplacerTest = {
     state.savedKey = "";
     state.apiInput.value = "";
     state.inputDirty = false;
-    state.message.textContent = "";
+    state.maskedPreview = false;
     this.setProviderState(state.providerID, "missing", "");
     this.updatePanelState(state);
     const provider = this.getProvider(state.providerID);
@@ -3728,7 +3967,9 @@ var SelectionReplacerTest = {
     if (!state) return false;
     const provider = this.getProvider(state.providerID);
     const credentials = provider.credentials;
-    const inputKey = String(state.apiInput?.value || "").trim();
+    const inputKey = state.inputDirty
+      ? String(state.apiInput?.value || "").trim()
+      : "";
     const apiKey = inputKey || state.savedKey
       || String(await credentials?.getKey?.() || "").trim();
     if (!apiKey) {
@@ -3744,7 +3985,9 @@ var SelectionReplacerTest = {
     const providerID = state?.providerID || this.activeProviderID;
     const provider = this.getProvider(providerID);
     const credentials = provider.credentials;
-    const inputKey = String(state?.apiInput?.value || "").trim();
+    const inputKey = state?.inputDirty
+      ? String(state.apiInput?.value || "").trim()
+      : "";
     const apiKey = String(options.apiKey || inputKey || state?.savedKey
       || await credentials?.getKey?.() || "").trim();
     if (!apiKey) {
@@ -3767,7 +4010,11 @@ var SelectionReplacerTest = {
         await credentials.saveKey(inputKey);
         if (state) state.savedKey = inputKey;
       }
-      if (state && shouldSave) state.apiInput.value = "";
+      if (state && shouldSave) {
+        state.apiInput.value = "";
+        state.inputDirty = false;
+        state.maskedPreview = true;
+      }
       providerState.status = "configured";
       providerState.message = "";
       if (state) this.setPanelMessage(state,
@@ -3799,6 +4046,7 @@ var SelectionReplacerTest = {
         state.savedKey = "";
         state.apiInput.value = "";
         state.inputDirty = false;
+        state.maskedPreview = false;
       }
       this.setProviderState(providerID, "missing", "");
       if (state) this.setPanelMessage(state, provider.label + " API Key 已删除。", false);
@@ -3835,11 +4083,31 @@ var SelectionReplacerTest = {
       ? "var(--material-button-hover, rgba(0,0,0,.12))" : "transparent";
     state.deepSeekButton.style.background = isQwen
       ? "transparent" : "var(--material-button-hover, rgba(0,0,0,.12))";
-    state.apiInput.placeholder = state.savedKey
-      ? "已保存：" + this.maskAPIKey(state.savedKey)
-      : (isQwen ? "输入千问 API Key" : "输入 DeepSeek API Key");
-    state.apiInput.setAttribute("aria-label",
-      isQwen ? "千问 API Key" : "DeepSeek API Key");
+    const editing = Boolean(state.inputDirty);
+    const hasSavedKey = Boolean(state.savedKey);
+    const inputL10nID = isQwen
+      ? "reader-selection-replacer-test-pane-api-key-qwen"
+      : "reader-selection-replacer-test-pane-api-key-deepseek";
+    this.setPanelAttributes(state.apiInput, inputL10nID, {
+      placeholder: isQwen ? "输入千问 API Key" : "输入 DeepSeek API Key",
+      "aria-label": isQwen ? "千问 API Key" : "DeepSeek API Key"
+    });
+    if (hasSavedKey && !editing) {
+      state.apiInput.readOnly = true;
+      state.apiInput.type = "text";
+      state.apiInput.value = this.maskAPIKey(state.savedKey);
+      state.apiInput.placeholder = "";
+      state.apiInput.style.color = "var(--fill-secondary, #9ca3af)";
+      state.maskedPreview = true;
+    }
+    else {
+      state.apiInput.readOnly = false;
+      state.apiInput.type = "password";
+      state.apiInput.style.color = "inherit";
+      if (!editing) state.apiInput.value = "";
+      state.maskedPreview = false;
+    }
+    state.apiInput.setAttribute("aria-readonly", String(Boolean(state.apiInput.readOnly)));
     state.apiStatus.textContent = this.providerStatusText(provider, providerState);
     state.statusLamp.style.background = this.providerStatusColor(providerState.status);
     state.retryValidation.style.visibility =
@@ -3847,9 +4115,6 @@ var SelectionReplacerTest = {
     state.retryValidation.disabled = providerState.status === "validating";
     state.saveKey.disabled = providerState.status === "validating";
     state.resetKey.disabled = providerState.status === "validating";
-    if (providerState.message && !state.message.textContent) {
-      state.message.textContent = providerState.message;
-    }
   },
 
   formatAutoTargetStatus(session, kind) {
@@ -3984,7 +4249,7 @@ var SelectionReplacerTest = {
       if (targets.length) {
         SelectionReplacerOverlay.attach(reader, view, targets,
           { mode: "diagnostic", recordID: "front-matter", segments,
-            translations: retainedResults });
+            translations: retainedResults, translationPending: true });
       }
       this.setReaderStatus(reader, this.formatAutoStatusV2({ ...located, targets }));
       const translation = await TranslationCoordinator.translateSegments({
@@ -4195,19 +4460,19 @@ var SelectionReplacerTest = {
     button.setAttribute("aria-label", button.title);
     button.style.display = "block";
     button.style.boxSizing = "border-box";
-    button.style.width = "calc(100% - 48px)";
-    button.style.maxWidth = "280px";
-    button.style.height = "64px";
-    button.style.minHeight = "0";
-    button.style.maxHeight = "64px";
+    button.style.width = "calc(100% - 64px)";
+    button.style.maxWidth = "220px";
+    button.style.height = "42px";
+    button.style.minHeight = "42px";
+    button.style.maxHeight = "42px";
     button.style.margin = "0 auto";
-    button.style.padding = "4px 12px";
-    button.style.border = "2px solid var(--fill-quinary, rgba(255,255,255,.28))";
-    button.style.borderRadius = "12px";
+    button.style.padding = "2px 10px";
+    button.style.border = "1px solid var(--fill-quinary, rgba(255,255,255,.28))";
+    button.style.borderRadius = "8px";
     button.style.background = "var(--material-button, rgba(127,127,127,.12))";
     button.style.color = "var(--fill-primary, #f4f4f4)";
     button.style.font = "inherit";
-    button.style.fontSize = "16px";
+    button.style.fontSize = "14px";
     button.style.lineHeight = "1.2";
     button.style.textAlign = "center";
     button.style.cursor = "pointer";

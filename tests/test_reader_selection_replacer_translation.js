@@ -184,6 +184,15 @@ assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
   assert.strictEqual(validationRequest.method, "POST");
   assert.strictEqual(validationRequest.endpoint,
     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions");
+  assert.strictEqual(validationRequest.options.timeout, 5000);
+
+  let deepSeekValidationRequest = null;
+  context.Zotero.HTTP.request = async (method, endpoint, options) => {
+    deepSeekValidationRequest = { method, endpoint, options };
+    return { status: 200, response: { data: [{ id: "deepseek-v4-flash" }] } };
+  };
+  assert.strictEqual(await context.DeepSeekCredentials.validateKey("deepseek-secret"), true);
+  assert.strictEqual(deepSeekValidationRequest.options.timeout, 5000);
   context.Services.logins.searchLoginsAsync = originalLoginSearch;
   context.Services.logins.addLoginAsync = originalLoginAdd;
   context.Services.logins.removeLogin = originalLoginRemove;
@@ -235,11 +244,55 @@ assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
   assert.strictEqual(qwenRequest.method, "POST");
   assert.strictEqual(qwenRequest.endpoint,
     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions");
+  assert.strictEqual(qwenRequest.options.timeout, 10000);
   assert.deepStrictEqual(JSON.parse(qwenRequest.options.body), {
     model: "qwen-mt-plus",
     messages: [{ role: "user", content: "A Qwen title" }],
     translation_options: { source_lang: "English", target_lang: "Chinese" }
   });
+
+  let qwenFailureCalls = 0;
+  context.Zotero.HTTP.request = async () => {
+    qwenFailureCalls++;
+    throw new Error("timeout");
+  };
+  await assert.rejects(
+    context.QwenMTPlusTranslationClient.request(
+      "qwen-secret",
+      [{ ...segments[0], id: "qwen-timeout" }],
+      { cancelled: false },
+      {}
+    ),
+    /timeout/u
+  );
+  assert.strictEqual(qwenFailureCalls, 1);
+
+  for (const status of [401, 403]) {
+    context.Zotero.HTTP.request = async () => ({ status, response: {} });
+    await assert.rejects(
+      context.QwenMTPlusTranslationClient.request(
+        "qwen-secret",
+        [{ ...segments[0], id: `qwen-auth-${status}` }],
+        { cancelled: false },
+        {}
+      ),
+      error => error.status === status && /API Key 无效/u.test(error.message)
+    );
+    await assert.rejects(
+      context.DeepSeekTranslationClient.request(
+        "deepseek-secret",
+        [{ ...segments[0], id: `deepseek-auth-${status}` }],
+        { cancelled: false },
+        false
+      ),
+      error => error.status === status && /API Key 无效/u.test(error.message)
+    );
+  }
+
+  context.Zotero.HTTP.request = async (method, endpoint, options) => {
+    qwenRequest = { method, endpoint, options };
+    return { status: 200, response: { choices: [{ message: { content: "Qwen 标题译文" } }] } };
+  };
 
   const qwenResult = await context.TranslationCoordinator.translateSegments({
     attachment: { libraryID: 1, key: "ATT" },
