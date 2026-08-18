@@ -302,7 +302,7 @@ var DeepSeekTranslationClient = {
     if (selection) {
       return [
         "将用户从英文学术 PDF 中划选的正文段落或文本忠实翻译为简体中文。",
-        "只返回 JSON：{\"translations\":[{\"id\":\"p-0\",\"zh\":\"中文\"}]}。",
+        "只返回 JSON：{\"translations\":[{\"id\":\"segment-id\",\"zh\":\"中文\"}]}。",
         "每个输入 id 恰好返回一次；不得解释、总结、增删事实或使用 Markdown。",
         "保持术语、数字、单位、缩写、变量、引用和原文语气准确。",
         "自定义段落译文必须是纯文本，禁止 <br>、任何 HTML 标签和 Markdown。",

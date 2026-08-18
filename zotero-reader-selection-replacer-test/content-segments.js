@@ -59,7 +59,10 @@ var ContentSegments = {
           selectionParagraphIndex: index,
           selectedText: String(paragraph.selectedText || ""),
           selectedPosition: paragraph.selectedPosition || null,
-          translationIndentFirstBlock: Boolean(paragraph.translationIndentFirstBlock)
+          translationIndentFirstBlock: Boolean(paragraph.translationIndentFirstBlock),
+          translationContinuesParagraph: Boolean(paragraph.translationContinuesParagraph),
+          translationSourceStart: paragraph.translationSourceStart ?? null,
+          translationSourceEnd: paragraph.translationSourceEnd ?? null
         }
       };
     }).filter(segment => segment.position && segment.sourceText);

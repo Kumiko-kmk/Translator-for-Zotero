@@ -346,6 +346,7 @@ function makeCrossPageFixture() {
   assert.strictEqual(match.diagnostics.fullParagraphCount, 1);
   assert.strictEqual(match.diagnostics.partialParagraphCount, 0);
   assert.strictEqual(match.paragraphs[0].matchType, "full");
+  assert.strictEqual(match.paragraphs[0].translationContinuesParagraph, false);
   assert.strictEqual(match.paragraphs[0].selectedRectCount, 8);
   assert.strictEqual(match.paragraphs[0].selectedPosition.fragments[0].rects.length, 8);
 }
@@ -364,9 +365,24 @@ function makeCrossPageFixture() {
   assert.strictEqual(paragraph.selectedText, "Alpha");
   assert.strictEqual(paragraph.translationText, "Alpha complete line");
   assert.ok(paragraph.translationPosition.fragments[0].rects[0][2] > 40);
+  assert.strictEqual(paragraph.translationContinuesParagraph, true);
   const segment = context.ContentSegments.fromSelection(match)[0];
   assert.strictEqual(segment.sourceText, "Alpha complete line");
   assert.strictEqual(segment.metadata.selectedText, "Alpha");
+  assert.strictEqual(segment.metadata.translationContinuesParagraph, true);
+  assert.strictEqual(segment.metadata.translationSourceStart, 0);
+  assert.ok(segment.metadata.translationSourceEnd > segment.metadata.translationSourceStart);
+}
+
+{
+  const fixture = makePartialLineFixture();
+  const secondLine = fixture.pages[0].chars.filter(char => char.rect[1] === 20);
+  const position = { pageIndex: 0, rects: [[0, 20, 40, 30]],
+    fragments: [{ pageIndex: 0, rects: [[0, 20, 40, 30]] }] };
+  const match = matcher.analyze({ ...fixture, position,
+    sourceText: secondLine.slice(0, 5).map(char => char.c).join("") });
+  assert.strictEqual(match.paragraphs[0].matchType, "partial");
+  assert.strictEqual(match.paragraphs[0].translationContinuesParagraph, false);
 }
 
 {
@@ -532,6 +548,77 @@ assert.strictEqual(
 }
 
 {
+  const selectionRecord = (recordID, sequence, start, end, translatedText,
+    continuesParagraph = true, options = {}) => {
+    const sourceIndex = options.sourceIndex ?? 4;
+    const sourceOrder = options.sourceOrder ?? sourceIndex;
+    const left = options.left ?? 0;
+    const right = options.right ?? 200;
+    const indentFirstBlock = options.indentFirstBlock ?? sequence === 0;
+    const segmentID = `${recordID}-segment`;
+    const position = { pageIndex: 0,
+      rects: [[left, sequence * 14, right, sequence * 14 + 12]],
+      fragments: [{ pageIndex: 0,
+        rects: [[left, sequence * 14, right, sequence * 14 + 12]],
+        lineCharCounts: [end - start + 1] }] };
+    const paragraph = { sourceIndex, sourceOrder, matchType: "partial",
+      selectedText: `source-${sequence}`,
+      translationText: `source-${sequence}`, translationPosition: position,
+      translationSourceStart: start, translationSourceEnd: end,
+      translationContinuesParagraph: continuesParagraph,
+      translationIndentFirstBlock: indentFirstBlock };
+    return { recordID, sequence, mode: "selection-translation",
+      match: { paragraphs: [paragraph] },
+      segments: [{ id: segmentID, sourceText: paragraph.translationText, position,
+        metadata: { sourceIndex, selectionParagraphIndex: 0,
+          translationSourceStart: start, translationSourceEnd: end,
+          translationContinuesParagraph: continuesParagraph,
+          translationIndentFirstBlock: indentFirstBlock } }],
+      translations: new Map([[segmentID, { status: "translated", translatedText }]]) };
+  };
+  const first = selectionRecord("first", 0, 0, 9, "第一部分");
+  const second = selectionRecord("second", 1, 10, 19, "第二部分", false);
+  const grouped = overlay.groupAdjacentSelectionTranslations([first, second]);
+  assert.strictEqual(grouped.records.length, 1);
+  assert.strictEqual(grouped.memberKeys.size, 2);
+  assert.strictEqual(grouped.records[0].translations.values().next().value.translatedText,
+    "第一部分第二部分");
+  assert.strictEqual(grouped.records[0].match.paragraphs[0].translationIndentFirstBlock, true);
+  assert.strictEqual(grouped.records[0].match.paragraphs[0].translationContinuesParagraph, false);
+  assert.strictEqual(grouped.records[0].segments[0].position.fragments.length, 2);
+  const separated = overlay.groupAdjacentSelectionTranslations([
+    first, selectionRecord("third", 2, 21, 29, "第三部分")]);
+  assert.strictEqual(separated.records.length, 0);
+  assert.strictEqual(separated.memberKeys.size, 0);
+  const splitByExtractor = overlay.groupAdjacentSelectionTranslations([
+    selectionRecord("column-first", 0, 0, 9, "双栏第一部分", true,
+      { sourceIndex: 20, sourceOrder: 20, indentFirstBlock: true }),
+    selectionRecord("column-second", 1, 0, 8, "双栏第二部分", true,
+      { sourceIndex: 21, sourceOrder: 21, indentFirstBlock: false }),
+    selectionRecord("column-third", 2, 0, 7, "双栏第三部分", false,
+      { sourceIndex: 22, sourceOrder: 22, indentFirstBlock: false })
+  ]);
+  assert.strictEqual(splitByExtractor.records.length, 1);
+  assert.strictEqual(splitByExtractor.memberKeys.size, 3);
+  assert.strictEqual(splitByExtractor.records[0].translations.values().next().value.translatedText,
+    "双栏第一部分双栏第二部分双栏第三部分");
+  const naturalParagraph = overlay.groupAdjacentSelectionTranslations([
+    selectionRecord("natural-first", 0, 0, 9, "自然段一", false,
+      { sourceIndex: 30, sourceOrder: 30, indentFirstBlock: true }),
+    selectionRecord("natural-second", 1, 0, 9, "自然段二", false,
+      { sourceIndex: 31, sourceOrder: 31, indentFirstBlock: true, left: 16 })
+  ]);
+  assert.strictEqual(naturalParagraph.records.length, 0);
+  const otherColumn = overlay.groupAdjacentSelectionTranslations([
+    selectionRecord("left-column", 0, 0, 9, "左栏", true,
+      { sourceIndex: 40, sourceOrder: 40, indentFirstBlock: true, left: 0, right: 200 }),
+    selectionRecord("right-column", 1, 0, 9, "右栏", false,
+      { sourceIndex: 41, sourceOrder: 41, indentFirstBlock: false, left: 300, right: 500 })
+  ]);
+  assert.strictEqual(otherColumn.records.length, 0);
+}
+
+{
   const node = {
     isConnected: true,
     style: {},
@@ -542,10 +629,11 @@ assert.strictEqual(
     containerWidth: 200, containerHeight: 50,
     translatedText: "选区段落译文自动换行",
     sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27]],
-    indentFirstBlock: true });
+    indentFirstBlock: true, paragraphLayout: true, continuesParagraph: true });
   assert.strictEqual(fitted.rendered, true);
   assert.strictEqual(fitted.layoutMode, "selection-fit");
-  assert.strictEqual(node.style.textAlign, "left");
+  assert.strictEqual(node.style.textAlign, "justify");
+  assert.strictEqual(node.style.textAlignLast, "justify");
   assert.strictEqual(node.style.whiteSpace, "pre-wrap");
   assert.strictEqual(node.style.overflowWrap, "break-word");
   assert.strictEqual(node.textContent, "　　选区段落译文自动换行");
@@ -606,9 +694,52 @@ assert.strictEqual(
     containerWidth: 200, containerHeight: 50,
     translatedText: "后续栏位译文",
     sourceRects: [[0, 0, 200, 12]],
-    indentFirstBlock: false });
+    indentFirstBlock: false, paragraphLayout: true });
   assert.strictEqual(fitted.rendered, true);
   assert.strictEqual(node.textContent, "后续栏位译文");
+  assert.strictEqual(node.style.textAlignLast, "auto");
+}
+
+{
+  const realMeasure = overlay.measureTextLayout;
+  let measurements = 0;
+  overlay.measureTextLayout = ({ node, containerWidth, containerHeight, fontSize, lineHeight }) => {
+    measurements++;
+    node.style.fontSize = `${fontSize}px`;
+    node.style.lineHeight = String(lineHeight);
+    const availableWidth = containerWidth - 8;
+    const availableHeight = containerHeight - 6;
+    const contentWidth = 160;
+    const contentHeight = fontSize * lineHeight * 4;
+    return { fits: contentWidth <= availableWidth + 1 && contentHeight <= availableHeight + 1,
+      contentWidth, contentHeight, availableWidth, availableHeight,
+      horizontalOverflow: false, verticalOverflow: contentHeight > availableHeight + 1 };
+  };
+  try {
+    const cache = new Map();
+    const node = { isConnected: true, style: {}, textContent: "", scrollHeight: 0,
+      scrollWidth: 0 };
+    const first = overlay.fitSelectionText({ node, containerWidth: 200,
+      containerHeight: 100, translatedText: "用于测试联合字号和行距搜索的译文",
+      sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27]],
+      paragraphLayout: true, layoutCache: cache, layoutSignature: "stable-layout" });
+    assert.strictEqual(first.rendered, true);
+    assert.ok(first.measureCount <= 8);
+    assert.ok(first.verticalUsage >= 0.90 && first.verticalUsage <= 0.98,
+      `unexpected vertical usage ${first.verticalUsage}`);
+    assert.strictEqual(node.style.height, "auto");
+    const afterFirst = measurements;
+    const second = overlay.fitSelectionText({ node, containerWidth: 200,
+      containerHeight: 100, translatedText: "用于测试联合字号和行距搜索的译文",
+      sourceRects: [[0, 0, 200, 12], [0, 15, 200, 27]],
+      paragraphLayout: true, layoutCache: cache, layoutSignature: "stable-layout" });
+    assert.strictEqual(second.cacheHit, true);
+    assert.strictEqual(second.measureCount, 0);
+    assert.strictEqual(measurements, afterFirst);
+  }
+  finally {
+    overlay.measureTextLayout = realMeasure;
+  }
 }
 
 {
@@ -639,14 +770,12 @@ assert.strictEqual(
   assert.deepStrictEqual(Array.from(selection.records.keys()), [
     "front-matter", "selection-test-1"
   ]);
-  selection.records.get("selection-test-1").displayModes.set(
-    "selection:p-0:0", "original");
+  selection.pageDisplayModes.set(0, "original");
   overlay.attach(reader, view, { paragraphs: [] }, {
     mode: "selection-translation", recordID: "selection-test-1",
     segments: [], translations: new Map(), translationPending: false
   });
-  assert.strictEqual(selection.records.get("selection-test-1").displayModes.get(
-    "selection:p-0:0"), "original");
+  assert.strictEqual(selection.pageDisplayModes.get(0), "original");
   overlay.remove(reader);
   assert.strictEqual(overlay.states.has(reader), false);
 }
@@ -766,35 +895,52 @@ assert.strictEqual(
 }
 
 {
-  const root = {
-    style: {},
-    dataset: {},
-    addEventListener(name, handler) { this[`on${name}`] = handler; }
-  };
+  const root = { style: {}, dataset: {} };
   const textNode = { style: {} };
-  const record = { displayModes: new Map() };
-  const rendered = [];
-  overlay.bindTranslationToggle(record, root, textNode, {
-    displayKey: "selection:p-0:0",
-    renderDisplay(showingOriginal) { rendered.push(showingOriginal); }
-  });
+  overlay.configureTranslationSelection(root, textNode, true, false);
   assert.strictEqual(root.style.pointerEvents, "auto");
-  assert.strictEqual(root.dataset.translationDisplayMode, "translation");
-  let prevented = 0;
+  assert.strictEqual(root.style.cursor, "text");
+  assert.strictEqual(root.style.userSelect, "text");
+  assert.strictEqual(textNode.style.pointerEvents, "auto");
+  assert.strictEqual(textNode.style.userSelect, "text");
+  assert.strictEqual(root.onclick, undefined);
+  overlay.configureTranslationSelection(root, textNode, true, true);
+  assert.strictEqual(root.style.pointerEvents, "none");
+  assert.strictEqual(textNode.style.userSelect, "none");
+}
+
+{
+  const pdfTextLayer = { style: { pointerEvents: "auto", userSelect: "text",
+    MozUserSelect: "text" } };
+  const page = { div: { querySelectorAll() { return [pdfTextLayer]; } } };
+  const handlers = {};
+  const doc = { addEventListener(name, handler) { handlers[name] = handler; },
+    defaultView: { addEventListener(name, handler) { handlers[name] = handler; } } };
+  const root = { style: {}, ownerDocument: doc,
+    addEventListener(name, handler) { this[`on${name}`] = handler; } };
+  const textNode = { style: {}, setAttribute(name, value) { this[name] = value; } };
+  const state = { translationSelectionActive: false,
+    view: { _iframeWindow: { PDFViewerApplication: { pdfViewer: { _pages: [page] } } } } };
+  overlay.configureTranslationSelection(root, textNode, true, false, state, 0);
   let stopped = 0;
-  root.onclick({ button: 0, preventDefault() { prevented++; },
-    stopPropagation() { stopped++; } });
-  assert.deepStrictEqual(rendered, [true]);
-  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "original");
-  assert.strictEqual(root.dataset.translationDisplayMode, "original");
-  root.onclick({ button: 0, preventDefault() { prevented++; },
-    stopPropagation() { stopped++; } });
-  assert.deepStrictEqual(rendered, [true, false]);
-  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "translation");
-  root.onclick({ button: 2 });
-  assert.deepStrictEqual(rendered, [true, false]);
-  assert.strictEqual(prevented, 2);
-  assert.strictEqual(stopped, 2);
+  root.onmousedown({ button: 0, stopPropagation() { stopped++; } });
+  assert.strictEqual(state.translationSelectionActive, true);
+  assert.strictEqual(pdfTextLayer.style.pointerEvents, "none");
+  assert.strictEqual(pdfTextLayer.style.userSelect, "none");
+  assert.strictEqual(stopped, 1);
+  handlers.mouseup();
+  assert.strictEqual(state.translationSelectionActive, false);
+  assert.strictEqual(pdfTextLayer.style.pointerEvents, "auto");
+  assert.strictEqual(pdfTextLayer.style.userSelect, "text");
+  const translationElement = { nodeType: 1, parentNode: null,
+    classList: { contains(value) {
+      return value === "reader-selection-replacer-translation-text";
+    } } };
+  state.view._iframeWindow.document = { getSelection() { return {
+    isCollapsed: false, anchorNode: translationElement, focusNode: translationElement,
+    toString() { return "可复制译文"; }
+  }; } };
+  assert.strictEqual(overlay.hasActiveTranslationSelection(state), true);
 }
 
 {
@@ -803,7 +949,7 @@ assert.strictEqual(
   const badge = { style: {} };
   overlay.applyTranslationDisplay(root, textNode, badge, true, "#ffffff");
   assert.strictEqual(root.style.background, "transparent");
-  assert.strictEqual(textNode.textContent, "");
+  assert.strictEqual(textNode.textContent, "原论文文字");
   assert.strictEqual(textNode.style.display, "none");
   assert.strictEqual(textNode.style.visibility, "hidden");
   assert.strictEqual(badge.style.display, "none");
@@ -834,35 +980,55 @@ assert.strictEqual(
 }
 
 {
-  const root = {
-    style: {},
-    dataset: {},
-    addEventListener(name, handler) { this[`on${name}`] = handler; }
-  };
-  const textNode = { style: {} };
-  const record = { displayModes: new Map() };
-  const rendered = [];
-  overlay.bindTranslationToggle(record, root, textNode, {
-    displayKey: "selection:p-0:0",
-    renderDisplay(showingOriginal) { rendered.push(showingOriginal); }
-  });
-  assert.strictEqual(root.style.pointerEvents, "auto");
-  assert.strictEqual(root.dataset.translationDisplayMode, "translation");
+  const makeButton = () => ({ style: {}, dataset: {}, children: [], parentNode: null,
+    append(...nodes) { for (const node of nodes) {
+      node.parentNode = this;
+      this.children.push(node);
+    } },
+    setAttribute(name, value) { this[name] = value; },
+    addEventListener(name, handler) { this[`on${name}`] = handler; },
+    remove() { this.parentNode = null; } });
+  const doc = { createElement() { const value = makeButton(); value.ownerDocument = doc; return value; } };
+  const pages = Array.from({ length: 3 }, () => ({ div: makeButton() }));
+  for (const page of pages) page.div.ownerDocument = doc;
+  const successful = text => ({ status: "translated", translatedText: text });
+  const records = new Map([
+    ["manual-0", { recordID: "manual-0", sequence: 0, pageIndexes: [0],
+      translations: new Map([["a", successful("首页手动译文")]]) }],
+    ["manual-1", { recordID: "manual-1", sequence: 1, pageIndexes: [1],
+      translations: new Map([["b", successful("安全页译文")]]) }],
+    ["manual-2", { recordID: "manual-2", sequence: 2, pageIndexes: [2],
+      translations: new Map([["c", successful("表格页手动译文")]]) }]
+  ]);
+  const state = { overlayLayers: new Map(), pageControlHosts: new Map(), records,
+    pageRecordIndex: new Map([[0, new Set(["manual-0"])], [1, new Set(["manual-1"])],
+      [2, new Set(["manual-2"])] ]), activePageIndexes: new Set([0, 1, 2]),
+    pageDisplayModes: new Map(), reader: {},
+    view: { _iframeWindow: { PDFViewerApplication: { pdfViewer: { _pages: pages } } } } };
+  overlay.renderPageDisplayControls(state);
+  assert.strictEqual(state.pageControlHosts.size, 3);
+  const firstBars = state.pageControlHosts.get(0)._selectionReplacerBars;
+  const secondBars = state.pageControlHosts.get(1)._selectionReplacerBars;
+  const tableBars = state.pageControlHosts.get(2)._selectionReplacerBars;
+  assert.strictEqual(firstBars.length, 2);
+  const firstButton = firstBars[0].displayButton;
+  assert.strictEqual(firstButton.textContent, "显示原文");
+  assert.strictEqual(firstBars[0].root.children.length, 1);
+  assert.strictEqual(firstBars[1].root.children.length, 1);
+  assert.strictEqual(secondBars[0].root.children.length, 1);
+  assert.strictEqual(tableBars[0].displayButton.style.display, "");
   let prevented = 0;
   let stopped = 0;
-  root.onclick({ button: 0, preventDefault() { prevented++; },
+  firstButton.onclick({ preventDefault() { prevented++; },
     stopPropagation() { stopped++; } });
-  assert.deepStrictEqual(rendered, [true]);
-  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "original");
-  assert.strictEqual(root.dataset.translationDisplayMode, "original");
-  root.onclick({ button: 0, preventDefault() { prevented++; },
-    stopPropagation() { stopped++; } });
-  assert.deepStrictEqual(rendered, [true, false]);
-  assert.strictEqual(record.displayModes.get("selection:p-0:0"), "translation");
-  root.onclick({ button: 2 });
-  assert.deepStrictEqual(rendered, [true, false]);
-  assert.strictEqual(prevented, 2);
-  assert.strictEqual(stopped, 2);
+  assert.strictEqual(state.pageDisplayModes.get(0), "original");
+  assert.strictEqual(state.pageDisplayModes.has(1), false);
+  assert.strictEqual(prevented, 1);
+  assert.strictEqual(stopped, 1);
+  assert.strictEqual(firstBars[0].displayButton.textContent, "显示译文");
+  assert.strictEqual(firstBars[1].displayButton.textContent, "显示译文");
+  assert.strictEqual(overlay.pageShowsOriginal(state, 0), true);
+  assert.strictEqual(overlay.pageShowsOriginal(state, 1), false);
 }
 
 {
@@ -1165,6 +1331,50 @@ assert.strictEqual(
     context.setTimeout = realSetTimeout;
     context.clearTimeout = realClearTimeout;
     timers.clear();
+  }
+}
+
+{
+  const makeElement = doc => ({ ownerDocument: doc, parentNode: null, children: [],
+    style: {}, className: "", append(node) { node.parentNode = this; this.children.push(node); },
+    remove() { this.parentNode = null; }, getElementsByClassName() { return []; } });
+  const doc = { createElement() { return makeElement(doc); } };
+  const pages = Array.from({ length: 10 }, () => ({ div: makeElement(doc) }));
+  const state = { view: { _iframeWindow: { PDFViewerApplication: {
+    pdfDocument: { numPages: 10 }, pdfViewer: { currentPageNumber: 5, _pages: pages }
+  } } }, currentPageIndex: 4, activePageIndexes: new Set(), overlayLayers: new Map(),
+    pageControlHosts: new Map(), dirtyPages: new Set() };
+  overlay.syncActiveWindow(state);
+  assert.deepStrictEqual(Array.from(state.overlayLayers.keys()), [3, 4, 5]);
+  assert.strictEqual(state.overlayLayers.size, 3);
+  state.currentPageIndex = 6;
+  overlay.syncActiveWindow(state);
+  assert.deepStrictEqual(Array.from(state.overlayLayers.keys()), [5, 6, 7]);
+  assert.strictEqual(state.overlayLayers.size, 3);
+}
+
+{
+  const handlers = {};
+  const eventBus = { on(name, handler) { handlers[name] = handler; } };
+  const state = { currentPageIndex: 4, activePageIndexes: new Set([3, 4, 5]),
+    dirtyPages: new Set(), eventHandlers: [], view: { _iframeWindow: {
+      PDFViewerApplication: { eventBus, pdfViewer: { currentPageNumber: 5, _pages: [] } }
+    } } };
+  const realSchedule = overlay.schedule;
+  let schedules = 0;
+  overlay.schedule = () => { schedules++; };
+  try {
+    overlay.bindEvents(state);
+    handlers.updateviewarea({ location: { pageNumber: 5 } });
+    assert.strictEqual(schedules, 0);
+    assert.strictEqual(state.dirtyPages.size, 0);
+    handlers.updateviewarea({ location: { pageNumber: 6 } });
+    assert.strictEqual(schedules, 1);
+    assert.strictEqual(state.currentPageIndex, 5);
+    assert.strictEqual(state.dirtyPages.size, 0);
+  }
+  finally {
+    overlay.schedule = realSchedule;
   }
 }
 

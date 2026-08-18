@@ -65,16 +65,21 @@ assert.strictEqual(segments[0].sourceLanguage, "en");
 assert.strictEqual(segments[1].sourceLanguage, "zh-CN");
 const selectionSegments = context.ContentSegments.fromSelection({ paragraphs: [{
   sourceText: "Full paragraph prose", selectedText: "Selected custom prose", selectedCharIDs: ["c3"],
-  selectedPosition: position, matchType: "partial", confidence: "high"
+  selectedPosition: position, matchType: "partial", confidence: "high",
+      translationContinuesParagraph: true,
+      translationSourceStart: 0,
+      translationSourceEnd: 20
 }, {
   sourceText: "Unclassified low confidence prose", selectedText: "Unclassified low confidence prose",
   selectedCharIDs: ["c4"], selectedPosition: position, matchType: "unclassified", confidence: "low"
 }] });
 assert.strictEqual(selectionSegments[0].kind, "custom");
 assert.strictEqual(selectionSegments[0].sourceText, "Selected custom prose");
+assert.strictEqual(selectionSegments[0].metadata.translationContinuesParagraph, true);
+assert.strictEqual(selectionSegments[0].metadata.translationSourceStart, 0);
+assert.strictEqual(selectionSegments[0].metadata.translationSourceEnd, 20);
 assert.strictEqual(selectionSegments[1].kind, "unclassified");
 assert.strictEqual(selectionSegments[1].sourceLanguage, "en");
-
 const parsed = context.DeepSeekTranslationClient.parse(
   '```json\n{"translations":[{"id":"title","zh":"可靠的科学标题"}]}\n```');
 const validated = context.DeepSeekTranslationClient.validate([segments[0]], parsed);
@@ -106,7 +111,6 @@ assert.throws(() => context.DeepSeekTranslationClient.validate([selectionSegment
   translations: [{ id: "p-0", zh: "自定义段落<br>不允许换行" }]
 }), /自定义段落译文/u);
 assert.match(context.DeepSeekTranslationClient.prompt(false, selectionSegments), /自定义段落译文/u);
-
 const qwenModel = context.TranslationModelRegistry.qwenMTPlus;
 assert.strictEqual(JSON.stringify(qwenModel), JSON.stringify({
   provider: "qwen-mt",
@@ -141,7 +145,6 @@ assert.strictEqual(deepSeekCacheKey.provider, "deepseek");
 assert.strictEqual(qwenCacheKey.provider, "qwen-mt");
 assert.strictEqual(qwenCacheKey.model, "qwen-mt-plus");
 assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
-
 (async () => {
   const originalGet = context.SegmentTranslationCache.get;
   const originalPut = context.SegmentTranslationCache.put;
@@ -308,6 +311,30 @@ assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
   assert.strictEqual(qwenResult.results.get("qwen-title").status, "translated");
   assert.strictEqual(qwenResult.results.get("qwen-title").provider, "qwen-mt");
   assert.strictEqual(qwenResult.results.get("qwen-title").model, "qwen-mt-plus");
+
+  const qwenSelectionOrder = [];
+  const qwenSelectionResult = await context.TranslationCoordinator.translateSegments({
+    attachment: { libraryID: 1, key: "ATT" },
+    segments: [
+      { ...selectionSegments[0], id: "qwen-selection-first" },
+      { ...selectionSegments[0], id: "qwen-selection-second" }
+    ],
+    bypassCache: true,
+    modelSpec: qwenModel,
+    credentials: { async getKey() { return "qwen-secret"; } },
+    translationClient: {
+      async translate(_key, batch) {
+        assert.strictEqual(batch.length, 1);
+        qwenSelectionOrder.push(batch[0].id);
+        return new Map([[batch[0].id, `Qwen 选区译文-${batch[0].id}`]]);
+      }
+    },
+    requestOptions: { targetLanguage: "zh-CN" }
+  });
+  assert.strictEqual(JSON.stringify(qwenSelectionOrder),
+    JSON.stringify(["qwen-selection-first", "qwen-selection-second"]));
+  assert.strictEqual(qwenSelectionResult.results.get("qwen-selection-first").status, "translated");
+  assert.strictEqual(qwenSelectionResult.results.get("qwen-selection-second").status, "translated");
 
   const originalQwenKey = context.QwenCredentials.getKey;
   const originalQwenTranslate = context.QwenMTPlusTranslationClient.translate;

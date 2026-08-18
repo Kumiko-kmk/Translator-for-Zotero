@@ -1,7 +1,7 @@
 "use strict";
 
 const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-const PLUGIN_VERSION = "1.1.0";
+const PLUGIN_VERSION = "1.2.0";
 const POPUP_CLASS = "reader-selection-replacer-test-popup";
 const PANE_ID = "reader-selection-replacer-test-pane";
 const PANEL_LOCALE_FILE = "reader-selection-replacer-test.ftl";
@@ -14,6 +14,8 @@ const LAYER_CLASS = "reader-selection-replacer-test-layer";
 const PARAGRAPH_TRANSLATION_INDENT = "　　";
 const TRANSLATION_FAILURE_COUNTDOWN_SECONDS = 5;
 const TRANSLATION_FAILURE_MESSAGE = "翻译失败，请手动重试";
+const ITEM_PANE_REGISTRATION_RETRY_DELAY = 250;
+const ITEM_PANE_REGISTRATION_MAX_RETRIES = 40;
 const PARAGRAPH_MARK_COLORS = [
   "#0ea5e9", "#f97316", "#22c55e", "#a855f7", "#eab308", "#ec4899"
 ];
@@ -400,6 +402,20 @@ var SelectionMatcher = {
       .filter(group => group.pageIndex === firstLine?.pageIndex);
     const indentFirstBlock = Boolean(firstLine
       && this.firstLineHasIndent(firstLine, comparisonLines));
+    const lastLine = lines.at(-1) || null;
+    const boundaryGroups = allBaseGroups.filter(group => Number(group?.pageIndex || 0)
+      === Number(lastLine?.pageIndex || 0));
+    const paragraphRights = boundaryGroups.map(group => Number(group?.rect?.[2] || 0))
+      .filter(Number.isFinite).sort((left, right) => left - right);
+    const lineHeights = boundaryGroups.map(group => Math.max(1,
+      Number(group?.rect?.[3] || 0) - Number(group?.rect?.[1] || 0)))
+      .filter(Number.isFinite).sort((left, right) => left - right);
+    const typicalRight = paragraphRights[Math.floor(paragraphRights.length / 2)] ?? null;
+    const typicalHeight = lineHeights[Math.floor(lineHeights.length / 2)] || 1;
+    const continuesParagraph = Boolean(lastLine && typicalRight !== null
+      && lastLine.sourceLineIndex < allBaseGroups.length - 1
+      && Math.abs(typicalRight - Number(lastLine.rect?.[2] || 0))
+        <= Math.max(2, typicalHeight * 0.35));
     return {
       lines,
       text: this.reconstructText(lines.flatMap(line => line.chars)),
@@ -407,7 +423,8 @@ var SelectionMatcher = {
         .filter(id => !/^\s+$/u.test(String((pageChars.find(char => String(char.id) === id)?.c) || ""))))],
       lineIDs: lines.map((line, index) => `${line.pageIndex}:selection-line:${index}`),
       position,
-      indentFirstBlock
+      indentFirstBlock,
+      continuesParagraph
     };
   },
 
@@ -582,7 +599,8 @@ var SelectionMatcher = {
     const paragraphCharIDs = new Set();
     const paragraphs = [];
     for (const paragraph of rawParagraphs || []) {
-      const sourceCharIDs = new Set((paragraph.sourceCharIDs || []).map(String));
+      const orderedSourceCharIDs = (paragraph.sourceCharIDs || []).map(String);
+      const sourceCharIDs = new Set(orderedSourceCharIDs);
       const selectedParagraphChars = selectedChars.filter(char => sourceCharIDs.has(char.id));
       const selectedParagraphIDs = selectedParagraphChars
         .filter(char => !char.ignorable && !/^\s+$/u.test(char.c))
@@ -595,6 +613,8 @@ var SelectionMatcher = {
         selectedParagraphChars, allChars, sourceCharIDs
       );
       const full = selectedParagraphIDs.length >= sourceCharIDs.size;
+      const completedIndexes = completed.charIDs.map(id => orderedSourceCharIDs.indexOf(String(id)))
+        .filter(index => index >= 0);
       paragraphs.push({
         sourceIndex: Number(paragraph.sourceIndex || 0),
         sourceOrder: Number(paragraph.sourceOrder || paragraph.sourceIndex || 0),
@@ -609,7 +629,10 @@ var SelectionMatcher = {
         translationCharIDs: completed.charIDs,
         translationLineIDs: completed.lineIDs,
         translationPosition: completed.position || selectedPosition,
-        translationIndentFirstBlock: completed.indentFirstBlock
+        translationIndentFirstBlock: completed.indentFirstBlock,
+        translationContinuesParagraph: !full && completed.continuesParagraph,
+        translationSourceStart: completedIndexes.length ? Math.min(...completedIndexes) : null,
+        translationSourceEnd: completedIndexes.length ? Math.max(...completedIndexes) : null
       });
     }
     paragraphs.sort((left, right) => left.sourceOrder - right.sourceOrder);
@@ -1862,6 +1885,17 @@ var SelectionReplacerOverlay = {
         nextSequence: 0,
         cancelled: false,
         overlayLayers: new Map(),
+        pageControlHosts: new Map(),
+        pageDisplayModes: new Map(),
+        activePageIndexes: new Set(),
+        currentPageIndex: null,
+        dirtyPages: new Set(),
+        pageRecordIndex: new Map(),
+        geometryRevision: 0,
+        geometryCache: new Map(),
+        pageRectCache: new Map(),
+        selectionLayoutCache: new Map(),
+        translationSelectionActive: false,
         failureTimers: new Map(),
         eventHandlers: [],
         renderTimer: null,
@@ -1882,7 +1916,6 @@ var SelectionReplacerOverlay = {
           SelectionReplacerTest.refreshAllPanels?.();
           return;
         }
-        this.schedule(state, 0);
       }, 1200);
     }
     state.view = view || state.view;
@@ -1892,7 +1925,7 @@ var SelectionReplacerOverlay = {
         ? `selection-${state.nextSequence + 1}` : "replacement"));
     const previous = state.records.get(recordID);
     if (previous) this.clearFailureCountdowns(state, previous);
-    state.records.set(recordID, {
+    const nextRecord = {
       recordID,
       mode,
       data,
@@ -1903,9 +1936,12 @@ var SelectionReplacerOverlay = {
       translationPending: Boolean(options.translationPending),
       failureCountdowns: new Map(),
       replacement: String(options.replacement || ""),
-      displayModes: previous?.displayModes || new Map(),
       sequence: previous?.sequence ?? state.nextSequence++
-    });
+    };
+    nextRecord.pageIndexes = this.recordPageIndexes(nextRecord);
+    state.records.set(recordID, nextRecord);
+    this.reindexRecord(state, recordID, previous?.pageIndexes || [], nextRecord.pageIndexes);
+    this.markPagesDirty(state, [...(previous?.pageIndexes || []), ...nextRecord.pageIndexes]);
     this.schedule(state, 0);
     return state;
   },
@@ -1917,7 +1953,11 @@ var SelectionReplacerOverlay = {
     const record = state.records.get(key);
     if (record) this.clearFailureCountdowns(state, record);
     const removed = state.records.delete(key);
-    if (removed) this.schedule(state, 0);
+    if (removed) {
+      this.reindexRecord(state, key, record?.pageIndexes || [], []);
+      this.markPagesDirty(state, record?.pageIndexes || []);
+      this.schedule(state, 0);
+    }
     return removed;
   },
 
@@ -2010,14 +2050,32 @@ var SelectionReplacerOverlay = {
     const win = state.view?._iframeWindow;
     const eventBus = win?.PDFViewerApplication?.eventBus;
     if (!eventBus || !win) return;
-    const requestLayout = () => this.schedule(state, 40);
-    let exported = requestLayout;
-    try { exported = Components.utils.exportFunction(requestLayout, win); }
-    catch (_) {}
-    for (const eventName of [
-      "pagerendered", "scalechanging", "rotationchanging",
-      "pagesloaded", "updateviewarea"
-    ]) {
+    const handlers = {
+      pagerendered: event => {
+        const pageIndex = Math.max(0, Number(event?.pageNumber || 1) - 1);
+        if (!state.activePageIndexes.has(pageIndex)) return;
+        this.markPagesDirty(state, [pageIndex]);
+        this.schedule(state, 40);
+      },
+      scalechanging: () => this.invalidateActiveGeometry(state),
+      rotationchanging: () => this.invalidateActiveGeometry(state),
+      pagesloaded: () => {
+        state.currentPageIndex = this.currentPageIndex(state);
+        this.markPagesDirty(state, this.renderWindow(state));
+        this.schedule(state, 40);
+      },
+      updateviewarea: event => {
+        const pageIndex = Math.max(0, Number(event?.location?.pageNumber
+          || event?.pageNumber || this.currentPageIndex(state) + 1) - 1);
+        if (pageIndex === state.currentPageIndex) return;
+        state.currentPageIndex = pageIndex;
+        this.schedule(state, 20);
+      }
+    };
+    for (const [eventName, handler] of Object.entries(handlers)) {
+      let exported = handler;
+      try { exported = Components.utils.exportFunction(handler, win); }
+      catch (_) {}
       try {
         eventBus.on(eventName, exported);
         state.eventHandlers.push([eventName, exported]);
@@ -2043,6 +2101,8 @@ var SelectionReplacerOverlay = {
     }
     for (const layer of state.overlayLayers.values()) layer.remove?.();
     state.overlayLayers.clear();
+    for (const host of state.pageControlHosts?.values?.() || []) host.remove?.();
+    state.pageControlHosts?.clear?.();
     this.states.delete(reader);
   },
 
@@ -2057,9 +2117,67 @@ var SelectionReplacerOverlay = {
   schedule(state, delay = 40) {
     if (state.cancelled) return;
     clearTimeout(state.renderTimer);
-    clearTimeout(state.settleTimer);
     state.renderTimer = setTimeout(() => this.render(state), delay);
-    state.settleTimer = setTimeout(() => this.render(state), delay + 180);
+  },
+
+  currentPageIndex(state) {
+    const viewer = state.view?._iframeWindow?.PDFViewerApplication?.pdfViewer;
+    return Math.max(0, Number(viewer?.currentPageNumber || 1) - 1);
+  },
+
+  renderWindow(state) {
+    const count = ReaderPageDataLoader.getPageCount(state.view);
+    const current = Number.isInteger(state.currentPageIndex)
+      ? state.currentPageIndex : this.currentPageIndex(state);
+    return [current - 1, current, current + 1]
+      .filter(pageIndex => pageIndex >= 0 && pageIndex < count);
+  },
+
+  markPagesDirty(state, pageIndexes) {
+    state.dirtyPages ||= new Set();
+    for (const value of pageIndexes || []) {
+      const pageIndex = Number(value);
+      if (Number.isInteger(pageIndex) && pageIndex >= 0) state.dirtyPages.add(pageIndex);
+    }
+  },
+
+  invalidateActiveGeometry(state) {
+    state.geometryRevision = Number(state.geometryRevision || 0) + 1;
+    state.geometryCache?.clear?.();
+    state.pageRectCache?.clear?.();
+    state.selectionLayoutCache?.clear?.();
+    this.markPagesDirty(state, state.activePageIndexes || []);
+    this.schedule(state, 40);
+  },
+
+  recordPageIndexes(record) {
+    const indexes = new Set();
+    const addPosition = position => {
+      for (const fragment of positionFragments(position)) {
+        const pageIndex = Number(fragment?.pageIndex);
+        if (Number.isInteger(pageIndex) && pageIndex >= 0) indexes.add(pageIndex);
+      }
+    };
+    for (const target of record?.targets || []) addPosition(target?.position);
+    for (const paragraph of record?.match?.paragraphs || []) {
+      addPosition(paragraph?.translationPosition || paragraph?.selectedPosition);
+    }
+    for (const segment of record?.segments || []) addPosition(segment?.position);
+    return [...indexes];
+  },
+
+  reindexRecord(state, recordID, previousPages, nextPages) {
+    state.pageRecordIndex ||= new Map();
+    for (const pageIndex of previousPages || []) {
+      const values = state.pageRecordIndex.get(Number(pageIndex));
+      values?.delete?.(recordID);
+      if (!values?.size) state.pageRecordIndex.delete(Number(pageIndex));
+    }
+    for (const pageIndex of nextPages || []) {
+      const numeric = Number(pageIndex);
+      if (!state.pageRecordIndex.has(numeric)) state.pageRecordIndex.set(numeric, new Set());
+      state.pageRecordIndex.get(numeric).add(recordID);
+    }
   },
 
   getPage(state, pageIndex) {
@@ -2068,6 +2186,7 @@ var SelectionReplacerOverlay = {
   },
 
   ensureLayer(state, pageIndex) {
+    if (state.activePageIndexes?.size && !state.activePageIndexes.has(Number(pageIndex))) return null;
     const page = this.getPage(state, pageIndex);
     if (!page?.div) return null;
     let layer = state.overlayLayers.get(pageIndex);
@@ -2089,9 +2208,17 @@ var SelectionReplacerOverlay = {
   },
 
   convertRect(state, rect, pageIndex) {
+    if (state.renderPageFilter !== undefined && Number(pageIndex) !== state.renderPageFilter) {
+      return null;
+    }
     const page = this.getPage(state, pageIndex);
     const win = state.view?._iframeWindow;
     if (!page?.div || !win || typeof state.view?.getClientRect !== "function") return null;
+    const revision = Number(state.geometryRevision || 0);
+    const values = Array.isArray(rect) ? rect.map(Number) : [];
+    const cacheKey = `${revision}:${Number(pageIndex)}:${values.join(",")}`;
+    const cached = state.geometryCache?.get?.(cacheKey);
+    if (cached) return cached.slice();
     let foreignRect = rect;
     try { foreignRect = Components.utils.cloneInto(rect, win); }
     catch (_) {}
@@ -2101,15 +2228,21 @@ var SelectionReplacerOverlay = {
       Zotero.logError?.(error);
       return null;
     }
-    const pageRect = page.div.getBoundingClientRect();
+    let pageRect = state.pageRectCache?.get?.(`${revision}:${Number(pageIndex)}`);
+    if (!pageRect) {
+      pageRect = page.div.getBoundingClientRect();
+      state.pageRectCache?.set?.(`${revision}:${Number(pageIndex)}`, pageRect);
+    }
     const converted = [
       Number(client?.[0]) - Number(pageRect.left),
       Number(client?.[1]) - Number(pageRect.top),
       Number(client?.[2]) - Number(pageRect.left),
       Number(client?.[3]) - Number(pageRect.top)
     ];
-    return converted.every(Number.isFinite) && converted[2] > converted[0] && converted[3] > converted[1]
-      ? converted : null;
+    if (!(converted.every(Number.isFinite) && converted[2] > converted[0]
+      && converted[3] > converted[1])) return null;
+    state.geometryCache?.set?.(cacheKey, converted.slice());
+    return converted;
   },
 
   pageColors(state, pageIndex) {
@@ -2136,17 +2269,50 @@ var SelectionReplacerOverlay = {
     };
   },
 
-  render(state) {
-    if (state.cancelled || !state.view) return;
-    for (const layer of state.overlayLayers.values()) layer.replaceChildren();
-    for (const record of [...state.records.values()].sort((left, right) =>
-      left.sequence - right.sequence)) {
+  syncActiveWindow(state) {
+    if (!Number.isInteger(state.currentPageIndex)) {
+      state.currentPageIndex = this.currentPageIndex(state);
+    }
+    const next = new Set(this.renderWindow(state));
+    const previous = state.activePageIndexes || new Set();
+    for (const pageIndex of previous) {
+      if (next.has(pageIndex)) continue;
+      state.overlayLayers.get(pageIndex)?.remove?.();
+      state.overlayLayers.delete(pageIndex);
+      state.pageControlHosts.get(pageIndex)?.remove?.();
+      state.pageControlHosts.delete(pageIndex);
+    }
+    state.activePageIndexes = next;
+    for (const pageIndex of next) {
+      if (!previous.has(pageIndex)) this.markPagesDirty(state, [pageIndex]);
+      this.ensureLayer(state, pageIndex);
+    }
+    return next;
+  },
+
+  recordsForPage(state, pageIndex) {
+    const ids = state.pageRecordIndex?.get?.(Number(pageIndex));
+    if (!ids?.size) return [];
+    return [...ids].map(id => state.records.get(id)).filter(Boolean)
+      .sort((left, right) => left.sequence - right.sequence);
+  },
+
+  renderRecordsForPage(state, pageIndex) {
+    const orderedRecords = this.recordsForPage(state, pageIndex);
+    const selectionFlow = this.groupAdjacentSelectionTranslations([...state.records.values()]
+      .sort((left, right) => left.sequence - right.sequence));
+    for (const record of selectionFlow.records) {
+      state.renderRecordID = record.recordID;
+      this.renderSelectionTranslations(state, record);
+    }
+    for (const record of orderedRecords) {
+      state.renderRecordID = record.recordID;
       if (record.mode === "diagnostic") {
         this.renderTargets(state, record);
         continue;
       }
       if (record.mode === "selection-translation") {
-        this.renderSelectionTranslations(state, record);
+        this.renderSelectionTranslations(state, record, selectionFlow.memberKeys);
         continue;
       }
       const paragraphs = record.match?.paragraphs || [];
@@ -2159,23 +2325,198 @@ var SelectionReplacerOverlay = {
           const lineCounts = fragment.lineCharCounts || [];
           for (let index = 0; index < fragment.rects.length; index++) {
             const rect = this.convertRect(state, fragment.rects[index], fragment.pageIndex);
-            if (rect) {
-              parts.push({
-                pageIndex: Number(fragment.pageIndex || 0),
-                rect,
-                sourceCharCount: Number(lineCounts[index] || 0)
-              });
-            }
+            if (rect) parts.push({ pageIndex: Number(fragment.pageIndex || 0), rect,
+              sourceCharCount: Number(lineCounts[index] || 0) });
           }
         }
         if (!parts.length) return;
         const chunks = splitReplacement(record.replacement, parts);
-        parts.forEach((part, partIndex) => {
-          this.renderPart(state, part, chunks[partIndex] || "", paragraph, paragraphIndex,
-            partIndex, displayIndex);
-        });
+        parts.forEach((part, partIndex) => this.renderPart(state, part,
+          chunks[partIndex] || "", paragraph, paragraphIndex, partIndex, displayIndex));
       });
     }
+    delete state.renderRecordID;
+  },
+
+  render(state) {
+    if (state.cancelled || !state.view) return;
+    if (state.translationSelectionActive || this.hasActiveTranslationSelection(state)) return;
+    const active = this.syncActiveWindow(state);
+    for (const pageIndex of active) {
+      if (!state.dirtyPages.has(pageIndex)) continue;
+      const layer = state.overlayLayers.get(pageIndex);
+      if (!layer) continue;
+      state.renderExistingNodes = new Map([...(layer.children || [])]
+        .filter(node => node?.dataset?.overlayKey)
+        .map(node => [node.dataset.overlayKey, node]));
+      state.renderSeenNodeKeys = new Set();
+      state.renderPageFilter = pageIndex;
+      this.renderRecordsForPage(state, pageIndex);
+      for (const node of [...(layer.children || [])]) {
+        const key = node?.dataset?.overlayKey;
+        if (!key || !state.renderSeenNodeKeys.has(key)) node.remove?.();
+      }
+      delete state.renderExistingNodes;
+      delete state.renderSeenNodeKeys;
+      state.dirtyPages.delete(pageIndex);
+    }
+    delete state.renderPageFilter;
+    this.renderPageDisplayControls(state);
+  },
+
+  reuseOverlayNode(state, key, signature) {
+    const node = state.renderExistingNodes?.get?.(key);
+    if (!node || node.dataset?.overlaySignature !== signature) return null;
+    state.renderSeenNodeKeys?.add?.(key);
+    return node;
+  },
+
+  registerOverlayNode(state, node, key, signature = "") {
+    if (!node || !key) return node;
+    const previous = state.renderExistingNodes?.get?.(key);
+    if (previous && previous !== node) previous.remove?.();
+    node.dataset.overlayKey = key;
+    node.dataset.overlaySignature = signature;
+    state.renderSeenNodeKeys?.add?.(key);
+    return node;
+  },
+
+  groupAdjacentSelectionTranslations(records) {
+    const entries = [];
+    for (const record of records || []) {
+      if (record?.mode !== "selection-translation") continue;
+      for (const [paragraphIndex, paragraph] of (record.match?.paragraphs || []).entries()) {
+        if (paragraph?.matchType === "unclassified") continue;
+        const segment = (record.segments || []).find(value =>
+          Number(value?.metadata?.selectionParagraphIndex) === paragraphIndex);
+        const translation = segment ? record.translations?.get?.(segment.id) : null;
+        const sourceIndex = Number(segment?.metadata?.sourceIndex ?? paragraph?.sourceIndex);
+        const start = Number(segment?.metadata?.translationSourceStart
+          ?? paragraph?.translationSourceStart);
+        const end = Number(segment?.metadata?.translationSourceEnd
+          ?? paragraph?.translationSourceEnd);
+        const sourceOrder = Number(paragraph?.sourceOrder ?? sourceIndex);
+        if (!segment || !["cached", "translated"].includes(translation?.status)
+          || !Number.isFinite(sourceIndex) || !Number.isFinite(start)
+          || !Number.isFinite(end) || end < start) continue;
+        const entry = { record, paragraph, paragraphIndex, segment, translation,
+          sourceIndex, sourceOrder, start, end,
+          key: `${record.recordID}:${paragraphIndex}` };
+        entries.push(entry);
+      }
+    }
+    const entryLines = entry => positionFragments(entry.segment.position).flatMap(fragment =>
+      (fragment.rects || []).map(rect => ({ pageIndex: Number(fragment.pageIndex || 0),
+        rect: [...rect] })));
+    const median = values => {
+      const ordered = [...values].filter(Number.isFinite).sort((left, right) => left - right);
+      return ordered[Math.floor(ordered.length / 2)] ?? 0;
+    };
+    const visuallyContinues = (previous, next) => {
+      if (next.sourceIndex === previous.sourceIndex) return next.start === previous.end + 1;
+      if (!Number.isFinite(previous.sourceOrder) || !Number.isFinite(next.sourceOrder)
+        || next.sourceOrder !== previous.sourceOrder + 1) return false;
+      if (Boolean(next.paragraph.translationIndentFirstBlock
+        || next.segment.metadata?.translationIndentFirstBlock)) return false;
+      const previousLines = entryLines(previous);
+      const nextLines = entryLines(next);
+      if (!previousLines.length || !nextLines.length) return false;
+      const previousLast = [...previousLines].sort((left, right) => left.pageIndex - right.pageIndex
+        || left.rect[1] - right.rect[1]).at(-1);
+      const nextFirst = [...nextLines].sort((left, right) => left.pageIndex - right.pageIndex
+        || left.rect[1] - right.rect[1])[0];
+      if (previousLast.pageIndex !== nextFirst.pageIndex) return false;
+      const allRects = [...previousLines, ...nextLines]
+        .filter(line => line.pageIndex === previousLast.pageIndex).map(line => line.rect);
+      const heights = allRects.map(rect => Math.max(1, rect[3] - rect[1]));
+      const typicalHeight = median(heights) || 12;
+      const gap = nextFirst.rect[1] - previousLast.rect[3];
+      if (gap < -typicalHeight * 0.7 || gap > typicalHeight * 1.4) return false;
+      const previousBand = [Math.min(...previousLines.map(line => line.rect[0])),
+        Math.max(...previousLines.map(line => line.rect[2]))];
+      const nextBand = [Math.min(...nextLines.map(line => line.rect[0])),
+        Math.max(...nextLines.map(line => line.rect[2]))];
+      const overlap = Math.max(0, Math.min(previousBand[1], nextBand[1])
+        - Math.max(previousBand[0], nextBand[0]));
+      if (overlap / Math.max(1, Math.min(previousBand[1] - previousBand[0],
+        nextBand[1] - nextBand[0])) < 0.72) return false;
+      const typicalRight = median(allRects.map(rect => rect[2]));
+      const typicalLeft = median(allRects.map(rect => rect[0]));
+      const tolerance = Math.max(2, typicalHeight * 0.35);
+      return Math.abs(previousLast.rect[2] - typicalRight) <= tolerance
+        && Math.abs(nextFirst.rect[0] - typicalLeft) <= tolerance;
+    };
+    const groupedRecords = [];
+    const memberKeys = new Set();
+    const ordered = entries.sort((left, right) => left.record.sequence - right.record.sequence
+      || left.paragraphIndex - right.paragraphIndex || left.sourceOrder - right.sourceOrder
+      || left.start - right.start);
+    if (ordered.length) {
+      let run = [];
+      const flush = () => {
+        if (run.length < 2) {
+          run = [];
+          return;
+        }
+        const fragments = run.flatMap(entry => positionFragments(entry.segment.position)
+          .map(fragment => ({ pageIndex: Number(fragment.pageIndex || 0),
+            rects: [...(fragment.rects || [])],
+            lineCharCounts: [...(fragment.lineCharCounts || [])] })));
+        if (!fragments.length) {
+          run = [];
+          return;
+        }
+        const first = run[0];
+        const last = run.at(-1);
+        const groupID = `selection-flow-${first.sourceIndex}-${last.sourceIndex}`
+          + `-${first.record.sequence}-${last.record.sequence}`;
+        const position = { pageIndex: fragments[0].pageIndex,
+          rects: fragments[0].rects, fragments };
+        const paragraph = {
+          ...first.paragraph,
+          sourceIndex: first.sourceIndex,
+          matchType: "partial",
+          selectedText: run.map(entry => entry.paragraph.selectedText || "").join(" ").trim(),
+          translationText: run.map(entry => entry.segment.sourceText || "").join(" ").trim(),
+          translationPosition: position,
+          translationSourceStart: first.start,
+          translationSourceEnd: last.end,
+          translationIndentFirstBlock: Boolean(first.paragraph.translationIndentFirstBlock
+            || first.segment.metadata?.translationIndentFirstBlock),
+          translationContinuesParagraph: Boolean(last.paragraph.translationContinuesParagraph
+            || last.segment.metadata?.translationContinuesParagraph)
+        };
+        const segment = {
+          ...first.segment,
+          id: groupID,
+          sourceText: paragraph.translationText,
+          position,
+          metadata: { ...first.segment.metadata, sourceIndex: first.sourceIndex,
+            selectionParagraphIndex: 0,
+            translationSourceStart: first.start, translationSourceEnd: last.end,
+            translationIndentFirstBlock: paragraph.translationIndentFirstBlock,
+            translationContinuesParagraph: paragraph.translationContinuesParagraph }
+        };
+        const translatedText = run.map(entry =>
+          String(entry.translation.translatedText || "").trim()).join("");
+        groupedRecords.push({ ...first.record, recordID: groupID,
+          sequence: first.record.sequence, match: { ...first.record.match, paragraphs: [paragraph] },
+          segments: [segment], translations: new Map([[groupID,
+            { status: "translated", translatedText }]]), translationPending: false });
+        for (const entry of run) memberKeys.add(entry.key);
+        run = [];
+      };
+      for (const entry of ordered) {
+        if (!run.length || visuallyContinues(run.at(-1), entry)) run.push(entry);
+        else {
+          flush();
+          run.push(entry);
+        }
+      }
+      flush();
+    }
+    groupedRecords.sort((left, right) => left.sequence - right.sequence);
+    return { records: groupedRecords, memberKeys };
   },
 
   renderTargets(state, record) {
@@ -2205,10 +2546,11 @@ var SelectionReplacerOverlay = {
     }
   },
 
-  renderSelectionTranslations(state, record) {
+  renderSelectionTranslations(state, record, skippedParagraphKeys = null) {
     const paragraphs = record.match?.paragraphs || [];
     const displayCounts = { paragraph: 0, unclassified: 0 };
     paragraphs.forEach((paragraph, paragraphIndex) => {
+      if (skippedParagraphKeys?.has?.(`${record.recordID}:${paragraphIndex}`)) return;
       const unclassified = paragraph.matchType === "unclassified";
       const displayKind = unclassified ? "unclassified" : "paragraph";
       const displayIndex = displayCounts[displayKind]++;
@@ -2233,6 +2575,11 @@ var SelectionReplacerOverlay = {
       }
       const merged = this.mergeSelectionParts(parts);
       if (!merged.length) return;
+      if (paragraph.matchType === "partial"
+        && Boolean(paragraph.translationContinuesParagraph
+          || segment?.metadata?.translationContinuesParagraph)) {
+        merged[merged.length - 1].continuesParagraph = true;
+      }
       const translatedText = ["cached", "translated"].includes(translation?.status)
         ? String(translation.translatedText || "") : "";
       const chunks = translatedText
@@ -2642,66 +2989,103 @@ var SelectionReplacerOverlay = {
   },
 
   fitSelectionText({ node, containerWidth, containerHeight, sourceRects, translatedText,
-    indentFirstBlock = false }) {
+    indentFirstBlock = false, paragraphLayout = false, continuesParagraph = false,
+    layoutCache = null, layoutSignature = "" }) {
     const heights = (sourceRects || []).map(rect => Math.max(1, rect[3] - rect[1]))
       .sort((left, right) => left - right);
     const medianHeight = heights[Math.floor(heights.length / 2)] || 12;
     const minimum = Math.max(5, Math.min(14, medianHeight * 0.42));
-    const maximum = Math.max(minimum, Math.min(28, medianHeight * 1.08));
+    const preferredMinimum = Math.max(minimum, Math.min(30, medianHeight * 0.85));
+    const preferredMaximum = Math.max(preferredMinimum, Math.min(30, medianHeight * 1.45));
     const availableHeight = Math.max(1, containerHeight - 6);
     const text = String(translatedText || "");
     node.textContent = indentFirstBlock && text
       ? `${PARAGRAPH_TRANSLATION_INDENT}${text}` : text;
     this.style(node, {
-      position: "absolute", top: "0", left: "0", width: "100%", height: "100%",
+      position: "absolute", top: "0", left: "0", width: "100%", height: "auto",
       boxSizing: "border-box", padding: "3px 4px", margin: "0", overflow: "hidden",
       whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: "normal",
-      letterSpacing: "normal", display: "block", textAlign: "left"
+      letterSpacing: "normal", display: "block",
+      textAlign: paragraphLayout ? "justify" : "left",
+      textAlignLast: paragraphLayout && continuesParagraph ? "justify" : "auto"
     });
-    const measure = (fontSize, lineHeight) => this.measureTextLayout({
-      node, containerWidth, containerHeight, fontSize, lineHeight, mode: "block"
-    });
+    const cached = layoutSignature && layoutCache?.get?.(layoutSignature);
+    if (cached) {
+      node.style.fontSize = `${cached.fontSize}px`;
+      node.style.lineHeight = String(cached.lineHeight);
+      return { ...cached, cacheHit: true, measureCount: 0 };
+    }
+    let measureCount = 0;
+    const measure = (fontSize, lineHeight) => {
+      measureCount++;
+      return this.measureTextLayout({ node, containerWidth, containerHeight,
+        fontSize, lineHeight, mode: "block" });
+    };
     const failure = (reason, fontSize = 0, lineHeight = 0) => ({
       rendered: false, layoutMode: "diagnostic", fontSize, lineHeight,
       renderedLineCount: 0, verticalUsage: 0, sourceRectCount: heights.length,
-      mergedRectCount: 1, failureReason: reason
+      mergedRectCount: 1, failureReason: reason, cacheHit: false, measureCount
     });
     if (!(node?.isConnected !== false) || !(containerWidth > 1) || !(containerHeight > 1)) {
       return failure("container-unavailable");
     }
-    const minimumMeasure = measure(minimum, 1.10);
-    if (!minimumMeasure.fits) {
-      return { ...failure("minimum-font-overflow", minimum, 1.10), ...minimumMeasure };
+    const candidates = [...new Set([
+      minimum, preferredMinimum, medianHeight,
+      medianHeight * 1.15, medianHeight * 1.30, preferredMaximum
+    ].map(value => Number(Math.max(minimum, Math.min(30, preferredMaximum, value)).toFixed(3))))]
+      .sort((left, right) => left - right);
+    const measured = [];
+    for (const fontSize of candidates.slice(0, 6)) {
+      const compact = measure(fontSize, 1.08);
+      if (!compact.fits) continue;
+      const lineCount = this.visualLineCount(node, fontSize, 1.08);
+      const compactUsage = compact.contentHeight / availableHeight;
+      const desiredLineHeight = Math.max(1.08, Math.min(3.00,
+        1.08 * 0.95 / Math.max(0.01, compactUsage)));
+      const predictedUsage = Math.min(1, compactUsage * desiredLineHeight / 1.08);
+      const score = Math.abs(predictedUsage - 0.95) * 8
+        + Math.abs(fontSize - medianHeight) / Math.max(1, medianHeight) * 0.30
+        + Math.abs(desiredLineHeight - 1.35) * 0.08;
+      measured.push({ fontSize, compact, lineCount, desiredLineHeight,
+        predictedUsage, score });
     }
-    let sizeLow = minimum;
-    let sizeHigh = maximum;
-    for (let iteration = 0; iteration < 10; iteration++) {
-      const middle = (sizeLow + sizeHigh) / 2;
-      if (measure(middle, 1.10).fits) sizeLow = middle;
-      else sizeHigh = middle;
+    if (!measured.length) {
+      const minimumMeasure = measureCount
+        ? this.measureTextLayout({ node, containerWidth, containerHeight,
+          fontSize: minimum, lineHeight: 1.08, mode: "block" })
+        : measure(minimum, 1.08);
+      return { ...failure("minimum-font-overflow", minimum, 1.08), ...minimumMeasure };
     }
-    const fontSize = sizeLow;
-    const compact = measure(fontSize, 1.10);
-    const renderedLineCount = this.visualLineCount(node, fontSize, 1.10);
-    const lineMaximum = renderedLineCount <= 1 ? 1.10
-      : renderedLineCount === 2 ? 1.55 : 1.90;
-    let lineLow = 1.10;
-    let lineHigh = lineMaximum;
-    for (let iteration = 0; iteration < 9; iteration++) {
-      const middle = (lineLow + lineHigh) / 2;
-      if (measure(fontSize, middle).fits) lineLow = middle;
-      else lineHigh = middle;
+    measured.sort((left, right) => left.score - right.score
+      || Math.abs(left.fontSize - medianHeight) - Math.abs(right.fontSize - medianHeight));
+    const selected = measured[0];
+    const fontSize = selected.fontSize;
+    let lineHeight = selected.desiredLineHeight;
+    let finalMeasure = measure(fontSize, lineHeight);
+    let verticalUsage = finalMeasure.contentHeight / availableHeight;
+    if (measureCount < 8 && (!finalMeasure.fits || verticalUsage < 0.90
+      || verticalUsage > 0.98)) {
+      const correction = 0.95 / Math.max(0.01, verticalUsage);
+      lineHeight = Math.max(1.08, Math.min(3.00,
+        lineHeight * correction * (finalMeasure.fits ? 1 : 0.96)));
+      finalMeasure = measure(fontSize, lineHeight);
+      verticalUsage = finalMeasure.contentHeight / availableHeight;
     }
-    const finalMeasure = measure(fontSize, lineLow);
-    const visualLineCount = this.visualLineCount(node, fontSize, lineLow);
-    const verticalUsage = Math.min(1, finalMeasure.contentHeight / availableHeight);
-    return {
+    if (!finalMeasure.fits) {
+      return { ...failure("minimum-font-overflow", fontSize, lineHeight), ...finalMeasure };
+    }
+    const visualLineCount = this.visualLineCount(node, fontSize, lineHeight);
+    const renderedLineCount = visualLineCount;
+    const result = {
       rendered: true, layoutMode: "selection-fit",
-      fontSize: Number(fontSize.toFixed(2)), lineHeight: Number(lineLow.toFixed(3)),
+      fontSize: Number(fontSize.toFixed(2)), lineHeight: Number(lineHeight.toFixed(3)),
       visualLineCount, renderedLineCount,
-      verticalUsage: Number(verticalUsage.toFixed(3)), ...compact, ...finalMeasure,
-      sourceRectCount: heights.length, mergedRectCount: 1, failureReason: ""
+      verticalUsage: Number(Math.min(1, verticalUsage).toFixed(3)), ...finalMeasure,
+      sourceRectCount: heights.length, mergedRectCount: 1, failureReason: "",
+      cacheHit: false, measureCount
     };
+    if (layoutSignature && layoutCache?.set) layoutCache.set(layoutSignature, { ...result });
+    return result;
   },
 
   translationDisplayKey({ targetKind = "", targetIndex = 0, partIndex = 0,
@@ -2710,38 +3094,176 @@ var SelectionReplacerOverlay = {
     return `auto:${targetKind}:${targetIndex}:${partIndex}`;
   },
 
-  bindTranslationToggle(record, root, textNode, options = {}) {
-    const displayKey = String(options.displayKey || "");
-    const renderDisplay = typeof options.renderDisplay === "function"
-      ? options.renderDisplay : null;
-    if (!record || !root || !textNode || !displayKey || !renderDisplay) return;
-    const displayModes = record.displayModes instanceof Map
-      ? record.displayModes : (record.displayModes = new Map());
-    const updateDataset = () => {
-      const showingOriginal = displayModes.get(displayKey) === "original";
-      root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
-      return showingOriginal;
+  pageShowsOriginal(state, pageIndex) {
+    return state?.pageDisplayModes?.get?.(Number(pageIndex || 0)) === "original";
+  },
+
+  hasActiveTranslationSelection(state) {
+    const selection = state?.view?._iframeWindow?.document?.getSelection?.();
+    if (!selection || selection.isCollapsed || !String(selection.toString?.() || "")) return false;
+    const insideTranslation = node => {
+      let current = node?.nodeType === 3 ? node.parentNode : node;
+      while (current) {
+        if (current.classList?.contains?.("reader-selection-replacer-translation-text")) return true;
+        current = current.parentNode;
+      }
+      return false;
     };
-    root.style.pointerEvents = "auto";
-    root.style.cursor = "pointer";
-    root.dataset.translationDisplayKey = displayKey;
-    updateDataset();
-    root.addEventListener("click", event => {
+    return insideTranslation(selection.anchorNode) || insideTranslation(selection.focusNode);
+  },
+
+  configureTranslationSelection(root, textNode, enabled, showingOriginal = false,
+    state = null, pageIndex = 0) {
+    if (!root || !textNode) return;
+    const selectable = Boolean(enabled && !showingOriginal);
+    root.style.pointerEvents = selectable ? "auto" : "none";
+    root.style.cursor = selectable ? "text" : "default";
+    root.style.userSelect = selectable ? "text" : "none";
+    root.style.MozUserSelect = selectable ? "text" : "none";
+    textNode.style.pointerEvents = selectable ? "auto" : "none";
+    textNode.style.cursor = selectable ? "text" : "default";
+    textNode.style.userSelect = selectable ? "text" : "none";
+    textNode.style.webkitUserSelect = selectable ? "text" : "none";
+    textNode.style.MozUserSelect = selectable ? "text" : "none";
+    textNode.setAttribute?.("draggable", "false");
+    if (!selectable || !root.addEventListener || root._selectionReplacerSelectionConfigured) return;
+    root._selectionReplacerSelectionConfigured = true;
+    root.addEventListener("mousedown", event => {
       if (event && event.button !== undefined && Number(event.button) !== 0) return;
+      if (state) state.translationSelectionActive = true;
+      event?.stopPropagation?.();
+      const page = state ? this.getPage(state, pageIndex) : null;
+      const textLayers = [...(page?.div?.querySelectorAll?.(".textLayer") || [])];
+      const saved = textLayers.map(layer => ({ layer,
+        pointerEvents: layer.style.pointerEvents,
+        userSelect: layer.style.userSelect,
+        mozUserSelect: layer.style.MozUserSelect }));
+      for (const { layer } of saved) {
+        layer.style.pointerEvents = "none";
+        layer.style.userSelect = "none";
+        layer.style.MozUserSelect = "none";
+      }
+      const doc = root.ownerDocument;
+      const finish = () => {
+        for (const savedLayer of saved) {
+          savedLayer.layer.style.pointerEvents = savedLayer.pointerEvents;
+          savedLayer.layer.style.userSelect = savedLayer.userSelect;
+          savedLayer.layer.style.MozUserSelect = savedLayer.mozUserSelect;
+        }
+        if (state) state.translationSelectionActive = false;
+      };
+      doc?.addEventListener?.("mouseup", finish, { capture: true, once: true });
+      doc?.defaultView?.addEventListener?.("blur", finish, { once: true });
+    });
+    root.addEventListener("selectstart", event => event?.stopPropagation?.());
+  },
+
+  pageHasSuccessfulTranslation(state, pageIndex) {
+    return this.recordsForPage(state, pageIndex).some(record =>
+      [...(record.translations?.values?.() || [])].some(result =>
+        ["cached", "translated"].includes(result?.status)
+          && Boolean(String(result?.translatedText || "").trim())));
+  },
+
+  stylePageControlButton(button) {
+    this.style(button, {
+      boxSizing: "border-box", minWidth: "64px", height: "25px",
+      padding: "2px 8px", border: "1px solid rgba(255, 255, 255, 0.55)",
+      borderRadius: "4px", color: "#ffffff", background: "rgba(37, 99, 235, 0.92)",
+      boxShadow: "0 1px 4px rgba(0, 0, 0, 0.28)", font: "12px/19px sans-serif",
+      whiteSpace: "nowrap", pointerEvents: "auto", cursor: "pointer",
+      userSelect: "none", webkitUserSelect: "none", MozUserSelect: "none"
+    });
+  },
+
+  makePageControlBar(state, pageIndex, doc, edge) {
+    const root = doc.createElement("div");
+    root.className = `reader-selection-replacer-page-controls ${edge}`;
+    this.style(root, { position: "absolute", left: "8px", zIndex: "2",
+      display: "flex", alignItems: "center", gap: "5px", pointerEvents: "none",
+      userSelect: "none", webkitUserSelect: "none", MozUserSelect: "none" });
+    root.style[edge === "bottom" ? "bottom" : "top"] = "8px";
+    const displayButton = doc.createElement("button");
+    displayButton.type = "button";
+    displayButton.className = "reader-selection-replacer-page-display-toggle";
+    this.stylePageControlButton(displayButton);
+    displayButton.addEventListener("click", event => {
       event?.preventDefault?.();
       event?.stopPropagation?.();
-      const showingOriginal = displayModes.get(displayKey) === "original";
-      displayModes.set(displayKey, showingOriginal ? "translation" : "original");
-      updateDataset();
-      renderDisplay(displayModes.get(displayKey) === "original");
+      const showingOriginal = this.pageShowsOriginal(state, pageIndex);
+      state.pageDisplayModes.set(pageIndex, showingOriginal ? "translation" : "original");
+      this.applyPageDisplayModeFast(state, pageIndex);
+      this.renderPageDisplayControls(state);
     });
+    root.append(displayButton);
+    return { root, displayButton };
+  },
+
+  ensurePageControlHost(state, pageIndex) {
+    const page = this.getPage(state, pageIndex);
+    if (!page?.div?.ownerDocument?.createElement) return null;
+    let host = state.pageControlHosts.get(pageIndex);
+    if (host?.parentNode !== page.div) {
+      host?.remove?.();
+      host = page.div.ownerDocument.createElement("div");
+      host.className = "reader-selection-replacer-page-controls-host";
+      this.style(host, { position: "absolute", inset: "0", zIndex: "65",
+        pointerEvents: "none", overflow: "hidden", userSelect: "none",
+        webkitUserSelect: "none", MozUserSelect: "none" });
+      const top = this.makePageControlBar(state, pageIndex, host.ownerDocument, "top");
+      const bottom = this.makePageControlBar(state, pageIndex, host.ownerDocument, "bottom");
+      host._selectionReplacerBars = [top, bottom];
+      host.append(top.root);
+      host.append(bottom.root);
+      page.div.append(host);
+      state.pageControlHosts.set(pageIndex, host);
+    }
+    return host;
+  },
+
+  applyPageDisplayModeFast(state, pageIndex) {
+    const layer = state.overlayLayers.get(Number(pageIndex));
+    if (!layer) return;
+    const roots = layer.querySelectorAll
+      ? [...layer.querySelectorAll('[data-translation-display-status="success"]')]
+      : [...(layer.children || [])].filter(node =>
+        node?.dataset?.translationDisplayStatus === "success");
+    const showingOriginal = this.pageShowsOriginal(state, pageIndex);
+    for (const root of roots) {
+      const textNode = root.querySelector?.(".reader-selection-replacer-translation-text")
+        || [...(root.children || [])].find(node =>
+          node?.className === "reader-selection-replacer-translation-text");
+      const badge = root.querySelector?.(".reader-selection-replacer-test-paragraph-badge,"
+        + ".reader-selection-replacer-test-auto-badge") || null;
+      this.applyTranslationDisplay(root, textNode, badge, showingOriginal,
+        root.dataset?.translationBackground || this.pageColors(state, pageIndex).background);
+      root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
+      this.configureTranslationSelection(root, textNode, true, showingOriginal,
+        state, pageIndex);
+    }
+  },
+
+  renderPageDisplayControls(state) {
+    for (const pageIndex of state?.activePageIndexes || []) {
+      const host = this.ensurePageControlHost(state, pageIndex);
+      if (!host) continue;
+      const successful = this.pageHasSuccessfulTranslation(state, pageIndex);
+      const showingOriginal = this.pageShowsOriginal(state, pageIndex);
+      for (const bar of host._selectionReplacerBars || []) {
+        const displayButton = bar.displayButton;
+        displayButton.style.display = successful ? "" : "none";
+        displayButton.textContent = showingOriginal ? "显示译文" : "显示原文";
+        displayButton.title = showingOriginal ? "显示本页全部译文" : "显示本页 PDF 原文";
+        displayButton.setAttribute?.("aria-pressed", showingOriginal ? "true" : "false");
+        bar.root.style.display = successful ? "flex" : "none";
+      }
+    }
   },
 
   applyTranslationDisplay(root, textNode, badge, showingOriginal, background) {
     if (!root || !textNode) return;
     root.style.background = showingOriginal ? "transparent" : background;
     if (showingOriginal) {
-      textNode.textContent = "";
       textNode.style.display = "none";
       textNode.style.visibility = "hidden";
       if (badge) badge.style.display = "none";
@@ -2769,6 +3291,20 @@ var SelectionReplacerOverlay = {
     const colors = this.pageColors(state, part.pageIndex);
     const translationPending = Boolean(record?.translationPending
       && (!translation || ["failed", "skipped"].includes(translation.status)));
+    const overlayKey = `auto:${record?.recordID || state.renderRecordID || ""}`
+      + `:${target.kind}:${targetIndex}:${partIndex}`;
+    const overlaySignature = [Number(state.geometryRevision || 0),
+      part.rect.map(value => Number(value).toFixed(2)).join(","),
+      translation?.status || "missing", translationPending ? 1 : 0,
+      target.kind,
+      translatedText].join("|");
+    if (["cached", "translated"].includes(translation?.status) && translatedText) {
+      const reused = this.reuseOverlayNode(state, overlayKey, overlaySignature);
+      if (reused) return { ...(reused._translationLayoutResult || {
+        rendered: true, layoutMode: `${target.kind}-fit`, sourceRectCount: part.sourceRects.length,
+        mergedRectCount: 1, failureReason: "", cacheHit: true, measureCount: 0
+      }), node: reused };
+    }
     const root = doc.createElement("div");
     root.className = "reader-selection-replacer-test-auto-part merged-translation";
     root.dataset.targetKind = target.kind;
@@ -2776,6 +3312,7 @@ var SelectionReplacerOverlay = {
     root.dataset.partIndex = String(partIndex);
     root.dataset.translationStatus = String(translation?.status || "missing");
     root.dataset.translationError = String(translation?.errorCode || "");
+    root.dataset.translationBackground = colors.background;
     this.style(root, {
       position: "absolute", boxSizing: "border-box", left: `${Math.max(0, left)}px`,
       top: `${Math.max(0, top)}px`, width: `${width}px`, height: `${height}px`,
@@ -2852,7 +3389,6 @@ var SelectionReplacerOverlay = {
       root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
       return displayFitted;
     };
-    const storedOriginal = record?.displayModes?.get?.(displayKey) === "original";
     const translationFitted = renderDisplay(false);
     const displayStatus = ["cached", "translated"].includes(translation?.status)
       && translatedText && !String(translationFitted.layoutMode || "").endsWith("-status")
@@ -2864,8 +3400,8 @@ var SelectionReplacerOverlay = {
       root.remove?.();
       return this.hiddenFailureResult(part);
     }
-    const showingOriginal = Boolean(storedOriginal && displayStatus === "success");
-    if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
+    const showingOriginal = Boolean(displayStatus === "success"
+      && this.pageShowsOriginal(state, part.pageIndex));
     let fitted = showingOriginal ? renderDisplay(true) : translationFitted;
     if (failureCountdown?.active) {
       fitted = this.renderTranslationStatus(textNode, target.kind,
@@ -2881,14 +3417,17 @@ var SelectionReplacerOverlay = {
       badge.textContent = decoration.badgeText;
       this.style(badge, { position: "absolute", left: "0", top: "0", zIndex: "3",
         padding: "0 3px", color: "#ffffff", background: accent,
-        font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none" });
+        font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none",
+        userSelect: "none", webkitUserSelect: "none" });
       badge.style.display = fitted.layoutMode === "original-page" ? "none" : "";
       root.append(badge);
     }
-    if (displayStatus === "success") {
-      this.bindTranslationToggle(record, root, textNode, { displayKey, renderDisplay });
-    }
-    return { ...fitted, node: root };
+    this.configureTranslationSelection(root, textNode,
+      displayStatus === "success", showingOriginal, state, part.pageIndex);
+    const result = { ...fitted, node: root };
+    root._translationLayoutResult = { ...fitted, node: undefined };
+    this.registerOverlayNode(state, root, overlayKey, overlaySignature);
+    return result;
   },
 
   renderTranslatedSelectionTarget(state, part, paragraph, segment, paragraphIndex,
@@ -2913,6 +3452,26 @@ var SelectionReplacerOverlay = {
     const translatedText = translationSucceeded ? String(translatedChunk || "") : "";
     const translationPending = Boolean(record?.translationPending
       && (!translation || ["failed", "skipped"].includes(translation.status)));
+    const indentFirstBlock = partIndex === 0
+      && Boolean(paragraph.translationIndentFirstBlock
+        || segment?.metadata?.translationIndentFirstBlock);
+    const paragraphLayout = paragraph.matchType !== "unclassified";
+    const continuesParagraph = paragraph.matchType === "partial"
+      && Boolean(part.continuesParagraph);
+    const overlayKey = `selection:${record?.recordID || state.renderRecordID || ""}`
+      + `:${segment?.id || paragraphIndex}:${partIndex}`;
+    const overlaySignature = [Number(state.geometryRevision || 0),
+      part.rect.map(value => Number(value).toFixed(2)).join(","),
+      translation?.status || "missing", translationPending ? 1 : 0,
+      paragraph.matchType, continuesParagraph ? 1 : 0, indentFirstBlock ? 1 : 0,
+      translatedText].join("|");
+    if (translationSucceeded && translatedText) {
+      const reused = this.reuseOverlayNode(state, overlayKey, overlaySignature);
+      if (reused) return { ...(reused._selectionLayoutResult || {
+        rendered: true, layoutMode: "selection-fit", sourceRectCount: part.sourceRects.length,
+        mergedRectCount: 1, failureReason: "", cacheHit: true, measureCount: 0
+      }), node: reused };
+    }
     const root = doc.createElement("div");
     root.className = "reader-selection-replacer-test-part merged-translation";
     root.dataset.paragraphIndex = String(paragraphIndex);
@@ -2921,6 +3480,7 @@ var SelectionReplacerOverlay = {
     root.dataset.translationStatus = String(translation?.status
       || (record?.translationPending ? "pending" : "missing"));
     root.dataset.translationError = String(translation?.errorCode || "");
+    root.dataset.translationBackground = colors.background;
     root.title = `选区段落 ${label}：${String(paragraph.selectedText || paragraph.sourceText || "")
       .replace(/\s+/gu, " ").trim().slice(0, 240)}`;
     this.style(root, {
@@ -2943,9 +3503,6 @@ var SelectionReplacerOverlay = {
     });
     root.append(textNode);
     layer.append(root);
-    const indentFirstBlock = partIndex === 0
-      && Boolean(paragraph.translationIndentFirstBlock
-        || segment?.metadata?.translationIndentFirstBlock);
     let badge = null;
     const renderDisplay = showingOriginal => {
       this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
@@ -2956,6 +3513,7 @@ var SelectionReplacerOverlay = {
           mergedRectCount: 1, failureReason: "" };
       }
       const displayText = translatedText;
+      textNode.style.textAlignLast = "auto";
       let displayFitted;
        if (translationPending) {
         displayFitted = this.renderTranslationStatus(textNode, "selection", "正在翻译…", "pending");
@@ -2972,10 +3530,16 @@ var SelectionReplacerOverlay = {
           mergedRectCount: 1, failureReason: "" };
       }
       else {
+        const layoutSignature = [record?.recordID || "", segment?.id || "", partIndex,
+          Number(state.geometryRevision || 0), Number(width.toFixed(2)), Number(height.toFixed(2)),
+          indentFirstBlock ? 1 : 0, paragraphLayout ? 1 : 0, continuesParagraph ? 1 : 0,
+          part.sourceRects.map(rect => rect.map(value => Number(value).toFixed(2)).join(",")).join(";"),
+          displayText].join("|");
         displayFitted = this.fitSelectionText({ node: textNode, containerWidth: width,
           containerHeight: height, sourceRects: part.sourceRects,
           translatedText: displayText,
-          indentFirstBlock });
+          indentFirstBlock, paragraphLayout, continuesParagraph,
+          layoutCache: state.selectionLayoutCache, layoutSignature });
         if (!displayFitted.rendered) {
           const layoutFailure = displayFitted;
           const status = this.renderTranslationStatus(textNode, "selection",
@@ -2987,7 +3551,6 @@ var SelectionReplacerOverlay = {
       root.dataset.translationDisplayMode = showingOriginal ? "original" : "translation";
       return displayFitted;
     };
-    const storedOriginal = record?.displayModes?.get?.(displayKey) === "original";
     const translationFitted = renderDisplay(false);
     const displayStatus = translationSucceeded && translatedText
       && !String(translationFitted.layoutMode || "").endsWith("-status")
@@ -2999,8 +3562,8 @@ var SelectionReplacerOverlay = {
       root.remove?.();
       return this.hiddenFailureResult(part);
     }
-    const showingOriginal = Boolean(storedOriginal && displayStatus === "success");
-    if (storedOriginal && !showingOriginal) record?.displayModes?.delete?.(displayKey);
+    const showingOriginal = Boolean(displayStatus === "success"
+      && this.pageShowsOriginal(state, part.pageIndex));
     let fitted = showingOriginal ? renderDisplay(true) : translationFitted;
     if (failureCountdown?.active) {
       fitted = this.renderTranslationStatus(textNode, "selection",
@@ -3014,16 +3577,19 @@ var SelectionReplacerOverlay = {
       this.style(badge, {
         position: "absolute", left: "0", top: "0", zIndex: "3", padding: "0 2px",
         color: "#ffffff", background: accent, font: "9px/12px sans-serif",
-        whiteSpace: "nowrap", pointerEvents: "none"
+        whiteSpace: "nowrap", pointerEvents: "none",
+        userSelect: "none", webkitUserSelect: "none"
       });
       badge.style.display = fitted.layoutMode === "original-page" ? "none" : "";
       root.append(badge);
     }
     root.dataset.translationDisplayStatus = displayStatus;
-    if (displayStatus === "success") {
-      this.bindTranslationToggle(record, root, textNode, { displayKey, renderDisplay });
-    }
-    return { ...fitted, node: root };
+    this.configureTranslationSelection(root, textNode,
+      displayStatus === "success", showingOriginal, state, part.pageIndex);
+    const result = { ...fitted, node: root };
+    root._selectionLayoutResult = { ...fitted, node: undefined };
+    this.registerOverlayNode(state, root, overlayKey, overlaySignature);
+    return result;
   },
 
   translationDecoration(kind, status) {
@@ -3101,6 +3667,9 @@ var SelectionReplacerOverlay = {
       root.append(badge);
     }
     layer.append(root);
+    this.registerOverlayNode(state, root,
+      `target:${state.renderRecordID || ""}:${target.kind}:${targetIndex}:${partIndex}`,
+      `${Number(state.geometryRevision || 0)}:${part.rect.join(",")}:${target.confidence || ""}`);
   },
 
   renderPart(state, part, text, paragraph, paragraphIndex, partIndex, displayIndex) {
@@ -3183,6 +3752,9 @@ var SelectionReplacerOverlay = {
       root.append(badge);
     }
     layer.append(root);
+    this.registerOverlayNode(state, root,
+      `replacement:${state.renderRecordID || ""}:${paragraphIndex}:${partIndex}`,
+      `${Number(state.geometryRevision || 0)}:${part.rect.join(",")}:${text}`);
   },
 
   style(element, styles) {
@@ -3203,6 +3775,9 @@ var SelectionReplacerTest = {
   selectionSessions: new Map(),
   selectionTaskCounter: 0,
   startingReaders: new Set(),
+  readerListenersRegistered: new Set(),
+  paneRegistrationRetryTimer: null,
+  paneRegistrationRetryCount: 0,
 
   async init(rootURI) {
     this.rootURI = rootURI;
@@ -3221,16 +3796,7 @@ var SelectionReplacerTest = {
     }
     SegmentTranslationCache.init();
     this.registerItemPane();
-    Zotero.Reader.registerEventListener(
-      "renderTextSelectionPopup",
-      this.onRenderTextSelectionPopup.bind(this),
-      PLUGIN_ID
-    );
-    Zotero.Reader.registerEventListener(
-      "renderToolbar",
-      this.onRenderToolbar.bind(this),
-      PLUGIN_ID
-    );
+    this.registerReaderListeners();
     Promise.resolve().then(() => {
       for (const reader of Zotero.Reader?._readers || []) this.autoMarkReader(reader);
     }).catch(error => Zotero.logError?.(error));
@@ -3240,11 +3806,67 @@ var SelectionReplacerTest = {
           || this.activeProviderID;
         await this.revalidateProviderKey(this.activeProviderID);
         this.refreshAllPanels();
-      }).catch(error => Zotero.logError?.(error));
+    }).catch(error => Zotero.logError?.(error));
     Zotero.debug?.(`[${PLUGIN_ID}] started v${PLUGIN_VERSION}`);
   },
 
+  registerReaderListeners() {
+    const reader = Zotero.Reader;
+    if (!reader?.registerEventListener) return false;
+    const listeners = [
+      ["renderTextSelectionPopup", this.onRenderTextSelectionPopup.bind(this)],
+      ["renderToolbar", this.onRenderToolbar.bind(this)]
+    ];
+    for (const [eventName, listener] of listeners) {
+      if (this.readerListenersRegistered.has(eventName)) continue;
+      try {
+        reader.registerEventListener(eventName, listener, PLUGIN_ID);
+        this.readerListenersRegistered.add(eventName);
+      }
+      catch (error) {
+        Zotero.logError?.(error);
+        return false;
+      }
+    }
+    return this.readerListenersRegistered.size === listeners.length;
+  },
+
+  onMainWindowLoad(window) {
+    try {
+      window?.MozXULElement?.insertFTLIfNeeded?.(PANEL_LOCALE_FILE);
+    }
+    catch (error) {
+      Zotero.logError?.(error);
+    }
+    insertPanelLocalizationIntoMainWindows();
+    this.registerItemPane();
+    this.registerReaderListeners();
+    this.refreshAllPanels();
+  },
+
+  clearPaneRegistrationRetry() {
+    if (this.paneRegistrationRetryTimer !== null) {
+      clearTimeout(this.paneRegistrationRetryTimer);
+      this.paneRegistrationRetryTimer = null;
+    }
+    this.paneRegistrationRetryCount = 0;
+  },
+
+  schedulePaneRegistrationRetry() {
+    if (this.registeredPaneID || this.paneRegistrationRetryTimer !== null) return;
+    if (this.paneRegistrationRetryCount >= ITEM_PANE_REGISTRATION_MAX_RETRIES) {
+      Zotero.debug?.(`[${PLUGIN_ID}] item pane registration deferred until the next main window load`);
+      return;
+    }
+    this.paneRegistrationRetryCount += 1;
+    this.paneRegistrationRetryTimer = setTimeout(() => {
+      this.paneRegistrationRetryTimer = null;
+      if (!this.registeredPaneID) this.registerItemPane();
+    }, ITEM_PANE_REGISTRATION_RETRY_DELAY);
+  },
+
   shutdown() {
+    this.clearPaneRegistrationRetry();
     Zotero.Reader._unregisterEventListenerByPluginID?.(PLUGIN_ID);
     if (this.registeredPaneID) {
       Zotero.ItemPaneManager?.unregisterSection?.(this.registeredPaneID);
@@ -3256,6 +3878,7 @@ var SelectionReplacerTest = {
     for (const session of this.selectionSessions.values()) session.cancelled = true;
     this.selectionSessions.clear();
     this.startingReaders.clear();
+    this.readerListenersRegistered.clear();
     this.readerStatus.clear();
     this.panelStates.clear();
     this.localization = null;
@@ -3286,25 +3909,42 @@ var SelectionReplacerTest = {
   },
 
   registerItemPane() {
+    if (this.registeredPaneID) return this.registeredPaneID;
     const manager = Zotero.ItemPaneManager;
-    if (!manager?.registerSection) return;
-    this.registeredPaneID = manager.registerSection({
-      paneID: PANE_ID,
-      pluginID: PLUGIN_ID,
-      header: {
-        l10nID: "reader-selection-replacer-test-pane-header",
-        icon: `${this.rootURI}icons/translator-for-zotero-16.svg`
-      },
-      sidenav: {
-        l10nID: "reader-selection-replacer-test-pane-sidenav",
-        icon: `${this.rootURI}icons/translator-for-zotero-20.svg`
-      },
-      onItemChange: ({ item, tabType, setEnabled }) => {
-        setEnabled(tabType === "reader" || Boolean(item?.isPDFAttachment?.()));
-      },
-      onRender: props => this.renderItemPane(props)
-    });
-    if (!this.registeredPaneID) throw new Error("无法注册 Translator for Zotero 右侧栏。");
+    if (!manager?.registerSection) {
+      this.schedulePaneRegistrationRetry();
+      return null;
+    }
+    try {
+      this.registeredPaneID = manager.registerSection({
+        paneID: PANE_ID,
+        pluginID: PLUGIN_ID,
+        header: {
+          l10nID: "reader-selection-replacer-test-pane-header",
+          icon: `${this.rootURI}icons/translator-for-zotero-16.svg`
+        },
+        sidenav: {
+          l10nID: "reader-selection-replacer-test-pane-sidenav",
+          icon: `${this.rootURI}icons/translator-for-zotero-20.svg`
+        },
+        onItemChange: ({ item, tabType, setEnabled }) => {
+          setEnabled(tabType === "reader" || Boolean(item?.isPDFAttachment?.()));
+        },
+        onRender: props => this.renderItemPane(props)
+      });
+    }
+    catch (error) {
+      Zotero.logError?.(error);
+      this.registeredPaneID = null;
+      this.schedulePaneRegistrationRetry();
+      return null;
+    }
+    if (!this.registeredPaneID) {
+      this.schedulePaneRegistrationRetry();
+      return null;
+    }
+    this.clearPaneRegistrationRetry();
+    return this.registeredPaneID;
   },
 
   legacyRenderItemPane({ doc, body, item, tabType }) {
@@ -4227,6 +4867,12 @@ var SelectionReplacerTest = {
     let session = null;
     try {
       const view = await this.waitForPDFView(reader);
+      if (!SelectionReplacerOverlay.states.has(reader)) {
+        SelectionReplacerOverlay.attach(reader, view, [], {
+          mode: "diagnostic", recordID: "front-matter", segments: [],
+          translations: new Map(), translationPending: true
+        });
+      }
       const metadata = await ReaderMetadataLoader.read(reader);
       const located = await ReaderTargetLocator.locate(view, metadata);
       const attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
@@ -4501,6 +5147,10 @@ var SelectionReplacerTest = {
 async function startup({ rootURI }) {
   await Zotero.initializationPromise;
   await SelectionReplacerTest.init(rootURI);
+}
+
+function onMainWindowLoad({ window }) {
+  SelectionReplacerTest.onMainWindowLoad(window);
 }
 
 function shutdown(data, reason) {
