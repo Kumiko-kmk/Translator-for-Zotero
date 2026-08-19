@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$sourceDir = Join-Path $projectRoot "zotero-reader-selection-replacer-test"
+$sourceDir = Join-Path $projectRoot "plugin"
 $distDir = Join-Path $projectRoot "dist"
 
 if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
@@ -36,7 +36,6 @@ if ($bootstrap -notmatch $versionDeclaration) {
 
 $packageFiles = @(
     "manifest.json",
-    "README.md",
     "bootstrap.js",
     "page-data-body-extractor.js",
     "content-segments.js",
@@ -48,8 +47,6 @@ $packageFiles = @(
     "icons/translator-for-zotero.png",
     "icons/qwen-symbol-32.png",
     "icons/deepseek-symbol-32.png",
-    "docs/translation-workflow.png",
-    "docs/system-architecture.png",
     "locale/en-US/reader-selection-replacer-test.ftl",
     "locale/zh-CN/reader-selection-replacer-test.ftl"
 )

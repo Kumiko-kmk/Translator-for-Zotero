@@ -1,4 +1,0 @@
-[WARN  l10nregistry_ffi::env] L10nRegistry error: Missing resource in locale zh-CN: toolkit/about/aboutAddons.ftl
-[WARN  l10nregistry_ffi::env] L10nRegistry error: Missing resource in locale zh-TW: toolkit/about/aboutAddons.ftl
-[WARN  webrender::device::gl] Missing optimized shader source for gpu_cache_update
-Missing chrome or resource URL: chrome://zotero/skin/16/white/loading.svg

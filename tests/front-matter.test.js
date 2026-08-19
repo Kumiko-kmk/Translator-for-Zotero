@@ -6,8 +6,8 @@ const path = require("path");
 const vm = require("vm");
 
 const root = path.resolve(__dirname, "..");
-const bootstrapPath = path.join(root, "zotero-reader-selection-replacer-test", "bootstrap.js");
-const extractorPath = path.join(root, "zotero-reader-selection-replacer-test", "page-data-body-extractor.js");
+const bootstrapPath = path.join(root, "plugin", "bootstrap.js");
+const extractorPath = path.join(root, "plugin", "page-data-body-extractor.js");
 const context = {
   console,
   setTimeout,
