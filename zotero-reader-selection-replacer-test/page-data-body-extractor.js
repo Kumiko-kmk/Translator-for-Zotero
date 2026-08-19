@@ -15,6 +15,8 @@
     crossFlowHeightTolerance: 0.16,
     paragraphIndentEm: 0.85,
     crossFlowFillRatio: 0.80,
+    embeddedProseMinimumLineHeightRatio: 0.58,
+    embeddedProseMaximumHeightDifference: 0.38,
     maximumSamplesPerReason: 3
   });
 
@@ -200,6 +202,115 @@
 
   function endsTerminal(value) {
     return /[.!?。！？][\])}'"”’]*\s*$/u.test(String(value || ""));
+  }
+
+  function mathSignalStats(value) {
+    const text = normalizeText(value)
+      // Numeric citation ranges and ordinary hyphenated terms are not
+      // mathematical evidence. Treating their dashes as operators caused
+      // short wrapped prose lines such as "... concrete [21-24]." to vanish.
+      .replace(/[\[(]\s*\d+[a-z]?(?:\s*[-,;]\s*\d+[a-z]?)*\s*[\])]/giu, " ")
+      .replace(/(\p{L})-(?=\p{L})/gu, "$1");
+    const strong = (text.match(/[=+×÷<>≤≥∑∫√^~±∞≈≠∂]/gu) || []).length;
+    const standaloneMinus = (text.match(/(?:^|\s)-\s*(?=[\p{L}\p{N}(])/gu) || []).length;
+    return { strong, standaloneMinus, total: strong + standaloneMinus };
+  }
+
+  function isNaturalLanguageProse(value) {
+    const stats = textStats(value);
+    if (!stats.chars) return false;
+    return (stats.words >= 5 && stats.letterRatio >= 0.52)
+      || (stats.words >= 3 && stats.letterRatio >= 0.64
+        && /[,.!?;:。！？；：]|\b(?:is|are|was|were|has|have|can|may|with|for|from|to|of|and|or)\b/iu
+          .test(normalizeText(value)));
+  }
+
+  function isBodyLikeProse(value) {
+    const stats = textStats(value);
+    const math = mathSignalStats(value);
+    return isNaturalLanguageProse(value)
+      || (stats.words >= 3 && stats.letters >= 8 && stats.letterRatio >= 0.48
+        && math.strong === 0);
+  }
+
+  function startsAsContinuation(value) {
+    return /^(?:\p{Ll}|and\b|or\b|but\b|while\b|whereas\b|which\b|that\b|with\b|of\b|to\b|for\b|from\b|in\b)/u
+      .test(normalizeText(value));
+  }
+
+  function flowFill(line) {
+    return (line.geometry.right - line.flowLeft)
+      / Math.max(1, line.flowRight - line.flowLeft);
+  }
+
+  function visualBodyContinuation(previous, current, bodyHeight) {
+    if (!previous || !current) return false;
+    const sameFlow = previous.flowKey === current.flowKey;
+    if (sameFlow) {
+      const gap = current.geometry.top - previous.geometry.bottom;
+      const leftDelta = Math.abs(current.geometry.left - previous.geometry.left);
+      return gap >= -bodyHeight * 0.45 && gap <= bodyHeight * 1.45
+        && (leftDelta <= bodyHeight * 1.8 || flowFill(previous) >= 0.76);
+    }
+    const adjacentPage = current.pageIndex === previous.pageIndex + 1;
+    const transition = adjacentPage ? "page-break"
+      : previous.pageIndex === current.pageIndex ? current.transitionBefore : "";
+    if (!new Set(["column-break", "page-break"]).has(transition)) return false;
+    return Math.abs(current.geometry.left - current.flowLeft) <= bodyHeight * 1.8
+      && (flowFill(previous) >= CONFIG.crossFlowFillRatio
+        || !endsTerminal(previous.text) || startsAsContinuation(current.text));
+  }
+
+  function nearestFlowLine(orderedLines, line, direction) {
+    for (let index = line.orderIndex + direction;
+      index >= 0 && index < orderedLines.length; index += direction) {
+      const candidate = orderedLines[index];
+      if (candidate.pageIndex !== line.pageIndex || candidate.flowKey !== line.flowKey) break;
+      if (!candidate.exclusionReason) return candidate;
+    }
+    return null;
+  }
+
+  function isStyledSectionHeading(line, bodyHeight, orderedLines) {
+    const text = normalizeText(line?.text);
+    const stats = textStats(text);
+    if (!text || endsTerminal(text) || stats.words < 2 || stats.words > 14
+      || text.length > 160) return false;
+    if (startsAsContinuation(text)) return false;
+    const heightRatio = line.fontHeight / Math.max(1, bodyHeight);
+    const emphasizedFont = /(?:bold|italic|oblique|semibold|demi)/iu
+      .test(String(line.primaryFont || ""));
+    const styleEvidence = emphasizedFont || line.bodyFontFraction < 0.35
+      || heightRatio >= 1.08 || heightRatio <= 0.90;
+    if (!styleEvidence) return false;
+    const previous = nearestFlowLine(orderedLines, line, -1);
+    const next = nearestFlowLine(orderedLines, line, 1);
+    if (!next || !isBodyLikeProse(next.text)) return false;
+    const readingPrevious = orderedLines.slice(0, line.orderIndex).reverse()
+      .find(candidate => !candidate.exclusionReason) || null;
+    if (readingPrevious && readingPrevious !== previous
+      && visualBodyContinuation(readingPrevious, line, bodyHeight)
+      && (!endsTerminal(readingPrevious.text) || startsAsContinuation(text))) {
+      return false;
+    }
+    const gapBefore = previous ? line.geometry.top - previous.geometry.bottom : Infinity;
+    const gapAfter = next.geometry.top - line.geometry.bottom;
+    const continuesPrevious = previous
+      && visualBodyContinuation(previous, line, bodyHeight)
+      && (!endsTerminal(previous.text) || startsAsContinuation(text));
+    if (continuesPrevious) return false;
+    const separatedBefore = !previous || gapBefore >= bodyHeight * 0.90
+      || !visualBodyContinuation(previous, line, bodyHeight);
+    const followedByBody = gapAfter >= -bodyHeight * 0.35
+      && gapAfter <= bodyHeight * 1.85;
+    if (!separatedBefore || !followedByBody) return false;
+    const flowWidth = Math.max(1, line.flowRight - line.flowLeft);
+    return line.geometry.width / flowWidth < 0.97;
+  }
+
+  function isSectionHeading(line, bodyHeight, orderedLines) {
+    return isLikelyHeading(line, bodyHeight)
+      || isStyledSectionHeading(line, bodyHeight, orderedLines);
   }
 
   function lineJoin(left, right, previousLine, currentLine) {
@@ -928,9 +1039,10 @@
   }
 
   function markFootnotes(orderedLines, bodyStyle, pages) {
+    const pagesByIndex = new Map((pages || []).map(page => [page.pageIndex, page]));
     for (const line of orderedLines) {
       if (line.exclusionReason) continue;
-      const page = pages[line.pageIndex];
+      const page = pagesByIndex.get(line.pageIndex);
       if (!page) continue;
       const explicitFootnote = /^(?:[*∗†‡]|\d{1,2})?\s*(?:corresponding\s+author|e-?mail\b)/iu
         .test(normalizeText(line.text));
@@ -960,14 +1072,15 @@
     for (const line of orderedLines) {
       if (line.exclusionReason) continue;
       const stats = textStats(line.text);
+      const math = mathSignalStats(line.text);
       const formula = isFormulaSeed(line, bodyStyle.height);
       const caption = captionLead(line.text);
       let reason = "";
       const evidence = [];
-      if (!formula.seed && stats.operators >= 1 && stats.words <= 7
+      if (!formula.seed && math.total >= 1 && stats.words <= 7
         && line.geometry.width < (line.flowRight - line.flowLeft) * 0.82) {
         reason = "possible-display-formula";
-        evidence.push("operator-and-compact-layout");
+        evidence.push("math-operator-and-compact-layout");
       }
       else if (caption) {
         reason = caption.proseContinuation ? "caption-like-prose" : "possible-caption";
@@ -1033,7 +1146,7 @@
         line.exclusionReason = "terminal-section";
       }
       else if (line.orderIndex > startLine.orderIndex && (!terminal || line.orderIndex < terminal.orderIndex)
-        && !line.exclusionReason && isLikelyHeading(line, bodyStyle.height)) {
+        && !line.exclusionReason && isSectionHeading(line, bodyStyle.height, orderedLines)) {
         line.exclusionReason = "section-heading";
       }
     }
@@ -1075,7 +1188,6 @@
       / Math.max(1, previous.fontHeight, current.fontHeight);
     const sameFlow = previous.flowKey === current.flowKey;
     if (sameFlow) {
-      if (heightDifference > CONFIG.bodyHeightTolerance) return { merge: false, reason: "font-change" };
       const profile = profiles.get(current.flowKey) || { baselineLeft: current.flowLeft, normalGap: bodyHeight * 0.35 };
       const gap = current.geometry.top - previous.geometry.bottom;
       if (gap > Math.max(profile.normalGap * CONFIG.lineGapMultiplier, bodyHeight * 0.95)) {
@@ -1084,6 +1196,19 @@
       const indent = current.geometry.left - profile.baselineLeft;
       const flowWidth = Math.max(1, previous.flowRight - previous.flowLeft);
       const fill = (previous.geometry.right - previous.flowLeft) / flowWidth;
+      const previousHeightRatio = previous.fontHeight / Math.max(1, bodyHeight);
+      const currentHeightRatio = current.fontHeight / Math.max(1, bodyHeight);
+      const bodyHeightBand = previousHeightRatio >= CONFIG.embeddedProseMinimumLineHeightRatio
+        && previousHeightRatio <= 1.42
+        && currentHeightRatio >= CONFIG.embeddedProseMinimumLineHeightRatio
+        && currentHeightRatio <= 1.42;
+      const wrappedProse = isBodyLikeProse(previous.text) && isBodyLikeProse(current.text)
+        && (!endsTerminal(previous.text) || fill >= 0.78 || startsAsContinuation(current.text));
+      if (heightDifference > CONFIG.bodyHeightTolerance
+        && !(heightDifference <= CONFIG.embeddedProseMaximumHeightDifference
+          && bodyHeightBand && wrappedProse)) {
+        return { merge: false, reason: "font-change" };
+      }
       if (indent > bodyHeight * CONFIG.paragraphIndentEm && endsTerminal(previous.text) && fill < 0.92) {
         return { merge: false, reason: "first-line-indent" };
       }
@@ -1091,12 +1216,15 @@
         && gap > profile.normalGap * 1.12) return { merge: false, reason: "completed-paragraph" };
       return { merge: true, reason: "same-flow-continuation" };
     }
+    if (current.pageIndex !== previous.pageIndex
+      && current.pageIndex !== previous.pageIndex + 1) {
+      return { merge: false, reason: "context-page-gap" };
+    }
     const transition = current.pageIndex !== previous.pageIndex ? "page-break"
       : previous.flowKey !== current.flowKey ? "column-break" : current.transitionBefore;
     if (!new Set(["column-break", "page-break"]).has(transition)) {
       return { merge: false, reason: transition || "flow-break" };
     }
-    if (heightDifference > CONFIG.crossFlowHeightTolerance) return { merge: false, reason: "cross-flow-font-change" };
     const profile = profiles.get(current.flowKey) || { baselineLeft: current.flowLeft };
     if (current.geometry.left - profile.baselineLeft > bodyHeight * CONFIG.paragraphIndentEm) {
       return { merge: false, reason: "cross-flow-indent" };
@@ -1104,6 +1232,20 @@
     const flowWidth = Math.max(1, previous.flowRight - previous.flowLeft);
     const fill = (previous.geometry.right - previous.flowLeft) / flowWidth;
     const hyphen = /[\u00ad-]$/u.test(previous.text) && /^\p{Ll}/u.test(current.text);
+    const previousHeightRatio = previous.fontHeight / Math.max(1, bodyHeight);
+    const currentHeightRatio = current.fontHeight / Math.max(1, bodyHeight);
+    const bodyHeightBand = previousHeightRatio >= CONFIG.embeddedProseMinimumLineHeightRatio
+      && previousHeightRatio <= 1.42
+      && currentHeightRatio >= CONFIG.embeddedProseMinimumLineHeightRatio
+      && currentHeightRatio <= 1.42;
+    const wrappedProse = isBodyLikeProse(previous.text) && isBodyLikeProse(current.text)
+      && (hyphen || !endsTerminal(previous.text) || fill >= CONFIG.crossFlowFillRatio
+        || startsAsContinuation(current.text));
+    if (heightDifference > CONFIG.crossFlowHeightTolerance
+      && !(heightDifference <= CONFIG.embeddedProseMaximumHeightDifference
+        && bodyHeightBand && wrappedProse)) {
+      return { merge: false, reason: "cross-flow-font-change" };
+    }
     if (hyphen || !endsTerminal(previous.text) || fill >= CONFIG.crossFlowFillRatio) {
       return { merge: true, reason: transition === "page-break"
         ? "page-continuation" : "column-continuation" };
@@ -1111,7 +1253,7 @@
     return { merge: false, reason: "completed-flow" };
   }
 
-  function compactRects(items) {
+  function compactRectEntries(items) {
     const sorted = [...items].sort((left, right) => left.geometry.left - right.geometry.left);
     const groups = [];
     for (const item of sorted) {
@@ -1124,18 +1266,26 @@
         last.viewportRight = Math.max(last.viewportRight, item.geometry.right);
       }
     }
-    return groups.map(group => boundingRect(group.items.map(item => item.pdfRect))).filter(Boolean);
+    return groups.map(group => ({
+      rect: boundingRect(group.items.map(item => item.pdfRect)),
+      sourceCharCount: group.items.length
+    })).filter(entry => entry.rect);
   }
 
   function paragraphPosition(lines) {
     const byPage = new Map();
     for (const line of lines) {
       if (!byPage.has(line.pageIndex)) byPage.set(line.pageIndex, []);
-      byPage.get(line.pageIndex).push(...compactRects(line.items));
+      byPage.get(line.pageIndex).push(...compactRectEntries(line.items));
     }
-    const fragments = [...byPage.entries()].sort((a, b) => a[0] - b[0]).map(([pageIndex, rects]) => ({
-      pageIndex, rects, coordinateSource: "zotero-page-char"
-    }));
+    const fragments = [...byPage.entries()].sort((a, b) => a[0] - b[0])
+      .map(([pageIndex, entries]) => ({
+        pageIndex,
+        rects: entries.map(entry => entry.rect),
+        lineCharCounts: entries.map(entry => entry.sourceCharCount),
+        sourceCharCount: entries.reduce((sum, entry) => sum + entry.sourceCharCount, 0),
+        coordinateSource: "zotero-page-char"
+      }));
     return {
       pageIndex: fragments[0]?.pageIndex || 0,
       rects: fragments[0]?.rects || [],
@@ -1860,7 +2010,7 @@
     return buildFrontMatterV2(orderedLines, bodyStyle, null, pages);
   }
 
-  function buildParagraphs(orderedLines, bodyStyle) {
+  function buildParagraphs(orderedLines, bodyStyle, options = {}) {
     const harmlessBetweenParagraphs = new Set([
       "page-number", "repeated-header", "repeated-footer", "publisher-metadata", "footnote"
     ]);
@@ -1895,17 +2045,24 @@
         if (joined.dehyphenated) current.transformedHyphenCount++;
       }
     }
-    return paragraphs.map((paragraph, index) => ({
-      sourceIndex: index,
-      sourceOrder: paragraph.lines[0].orderIndex,
-      text: normalizeText(paragraph.text),
-      contentType: "body-paragraph",
-      sourceCharIDs: paragraph.lines.flatMap(line => line.itemIDs),
-      sourceLineIDs: paragraph.lines.map(line => line.id),
-      mergeReasons: paragraph.mergeReasons,
-      transformedHyphenCount: paragraph.transformedHyphenCount,
-      position: paragraphPosition(paragraph.lines)
-    })).filter(paragraph => paragraph.text);
+    return paragraphs.map((paragraph, index) => {
+      const serialized = {
+        sourceIndex: index,
+        sourceOrder: paragraph.lines[0].orderIndex,
+        text: normalizeText(paragraph.text),
+        contentType: "body-paragraph",
+        sourceCharIDs: paragraph.lines.flatMap(line => line.itemIDs),
+        sourceLineIDs: paragraph.lines.map(line => line.id),
+        mergeReasons: paragraph.mergeReasons,
+        transformedHyphenCount: paragraph.transformedHyphenCount,
+        position: paragraphPosition(paragraph.lines)
+      };
+      if (options.includeLines) {
+        serialized._lines = paragraph.lines;
+        serialized._breakBeforeReason = paragraph.breakBeforeReason;
+      }
+      return serialized;
+    }).filter(paragraph => paragraph.text);
   }
 
   function aggregateExclusions(pages, orderedLines) {
