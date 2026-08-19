@@ -1,7 +1,0 @@
-*** You are running in headless mode.
-[WARN  l10nregistry_ffi::env] L10nRegistry error: Missing resource in locale zh-CN: toolkit/about/aboutAddons.ftl
-[WARN  l10nregistry_ffi::env] L10nRegistry error: Missing resource in locale zh-TW: toolkit/about/aboutAddons.ftl
-Missing chrome or resource URL: chrome://zotero/skin/16/white/loading.svg
-Missing chrome or resource URL: chrome://global/skin/browser.css
-[WARN  l10nregistry_ffi::env] L10nRegistry error: Missing resource in locale zh-CN: toolkit/global/commonDialog.ftl
-[WARN  l10nregistry_ffi::env] L10nRegistry error: Missing resource in locale zh-TW: toolkit/global/commonDialog.ftl

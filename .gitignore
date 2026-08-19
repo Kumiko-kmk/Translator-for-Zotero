@@ -3,7 +3,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-data/*.db
-data/*.db-*
-logs/*.json
+data/
+dist/
+logs/
 tmp/
+.DS_Store
+Thumbs.db
+.vscode/

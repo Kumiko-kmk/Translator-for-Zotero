@@ -4,7 +4,40 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = ROOT / "zotero-reader-selection-replacer-test"
+PLUGIN = ROOT / "plugin"
+PACKAGED_FILES = {
+    "manifest.json",
+    "bootstrap.js",
+    "page-data-body-extractor.js",
+    "content-segments.js",
+    "translation-service.js",
+    "icons/paper-assistant-16.svg",
+    "icons/paper-assistant-20.svg",
+    "icons/translator-for-zotero-16.svg",
+    "icons/translator-for-zotero-20.svg",
+    "icons/translator-for-zotero.png",
+    "icons/qwen-symbol-32.png",
+    "icons/deepseek-symbol-32.png",
+    "locale/en-US/reader-selection-replacer-test.ftl",
+    "locale/zh-CN/reader-selection-replacer-test.ftl",
+}
+
+
+def test_repository_layout_contains_only_the_active_plugin() -> None:
+    assert PLUGIN.is_dir()
+    assert (ROOT / "docs" / "DEVELOPMENT.md").is_file()
+    assert (ROOT / "tools" / "build_xpi.ps1").is_file()
+    for retired_path in (
+        "paper_assistant/main.py",
+        "zotero-reader-extraction-test/manifest.json",
+        "zotero-reader-highlighter/manifest.json",
+        "zotero-reader-selection-replacer-test/manifest.json",
+        "PROJECT_HANDOFF.md",
+        "run.py",
+        "requirements.txt",
+        "logs/zotero-0.6.1-final.stdout.log",
+    ):
+        assert not (ROOT / retired_path).exists()
 
 
 def test_selection_replacer_manifest_is_independent() -> None:
@@ -21,7 +54,7 @@ def test_selection_replacer_manifest_is_independent() -> None:
 
 
 def test_xpi_build_process_is_manifest_driven_and_validated() -> None:
-    source = (ROOT / "tools" / "build_reader_selection_replacer_test_xpi.ps1").read_text(
+    source = (ROOT / "tools" / "build_xpi.ps1").read_text(
         encoding="utf-8"
     )
     assert "param(" not in source
@@ -171,65 +204,8 @@ def test_selection_replacer_xpi_contents() -> None:
     if not xpi.exists():
         return
     with zipfile.ZipFile(xpi) as archive:
-        assert set(archive.namelist()) == {
-            "manifest.json",
-            "README.md",
-            "bootstrap.js",
-            "page-data-body-extractor.js",
-            "content-segments.js",
-            "translation-service.js",
-            "icons/paper-assistant-16.svg",
-            "icons/paper-assistant-20.svg",
-            "icons/translator-for-zotero-16.svg",
-            "icons/translator-for-zotero-20.svg",
-            "icons/translator-for-zotero.png",
-            "icons/qwen-symbol-32.png",
-            "icons/deepseek-symbol-32.png",
-            "docs/translation-workflow.png",
-            "docs/system-architecture.png",
-            "locale/en-US/reader-selection-replacer-test.ftl",
-            "locale/zh-CN/reader-selection-replacer-test.ftl",
-        }
+        assert set(archive.namelist()) == PACKAGED_FILES
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["version"] == "1.2.0"
-        assert archive.read("bootstrap.js") == (PLUGIN / "bootstrap.js").read_bytes()
-        assert archive.read("page-data-body-extractor.js") == (
-            PLUGIN / "page-data-body-extractor.js"
-        ).read_bytes()
-        assert archive.read("content-segments.js") == (PLUGIN / "content-segments.js").read_bytes()
-        assert archive.read("translation-service.js") == (
-            PLUGIN / "translation-service.js"
-        ).read_bytes()
-        assert archive.read("icons/paper-assistant-16.svg") == (
-            PLUGIN / "icons" / "paper-assistant-16.svg"
-        ).read_bytes()
-        assert archive.read("icons/paper-assistant-20.svg") == (
-            PLUGIN / "icons" / "paper-assistant-20.svg"
-        ).read_bytes()
-        assert archive.read("icons/translator-for-zotero.png") == (
-            PLUGIN / "icons" / "translator-for-zotero.png"
-        ).read_bytes()
-        assert archive.read("icons/translator-for-zotero-16.svg") == (
-            PLUGIN / "icons" / "translator-for-zotero-16.svg"
-        ).read_bytes()
-        assert archive.read("icons/translator-for-zotero-20.svg") == (
-            PLUGIN / "icons" / "translator-for-zotero-20.svg"
-        ).read_bytes()
-        assert archive.read("icons/qwen-symbol-32.png") == (
-            PLUGIN / "icons" / "qwen-symbol-32.png"
-        ).read_bytes()
-        assert archive.read("icons/deepseek-symbol-32.png") == (
-            PLUGIN / "icons" / "deepseek-symbol-32.png"
-        ).read_bytes()
-        assert archive.read("docs/translation-workflow.png") == (
-            PLUGIN / "docs" / "translation-workflow.png"
-        ).read_bytes()
-        assert archive.read("docs/system-architecture.png") == (
-            PLUGIN / "docs" / "system-architecture.png"
-        ).read_bytes()
-        assert archive.read("locale/en-US/reader-selection-replacer-test.ftl") == (
-            PLUGIN / "locale" / "en-US" / "reader-selection-replacer-test.ftl"
-        ).read_bytes()
-        assert archive.read("locale/zh-CN/reader-selection-replacer-test.ftl") == (
-            PLUGIN / "locale" / "zh-CN" / "reader-selection-replacer-test.ftl"
-        ).read_bytes()
+        for archive_path in PACKAGED_FILES:
+            assert archive.read(archive_path) == (PLUGIN / archive_path).read_bytes()

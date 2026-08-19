@@ -50,7 +50,7 @@ context.Components.Constructor = function() {
 context.Components.interfaces.nsILoginInfo = {};
 for (const name of ["content-segments.js", "translation-service.js"]) {
   vm.runInContext(fs.readFileSync(path.join(root,
-    "zotero-reader-selection-replacer-test", name), "utf8"), context, { filename: name });
+    "plugin", name), "utf8"), context, { filename: name });
 }
 
 const position = { pageIndex: 0, rects: [[1, 2, 100, 20]],

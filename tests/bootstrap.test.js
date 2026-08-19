@@ -8,7 +8,7 @@ const vm = require("vm");
 const bootstrapPath = path.resolve(
   __dirname,
   "..",
-  "zotero-reader-selection-replacer-test",
+  "plugin",
   "bootstrap.js"
 );
 const bootstrap = fs.readFileSync(bootstrapPath, "utf8");
@@ -47,10 +47,10 @@ context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(bootstrap, context, { filename: bootstrapPath });
 vm.runInContext(fs.readFileSync(path.resolve(
-  __dirname, "..", "zotero-reader-selection-replacer-test", "content-segments.js"
+  __dirname, "..", "plugin", "content-segments.js"
 ), "utf8"), context, { filename: "content-segments.js" });
 vm.runInContext(fs.readFileSync(path.resolve(
-  __dirname, "..", "zotero-reader-selection-replacer-test", "translation-service.js"
+  __dirname, "..", "plugin", "translation-service.js"
 ), "utf8"), context, { filename: "translation-service.js" });
 
 const matcher = context.SelectionMatcher;
