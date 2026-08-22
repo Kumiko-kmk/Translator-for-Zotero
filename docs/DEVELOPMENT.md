@@ -9,7 +9,22 @@
 - 插件 ID：`reader-selection-replacer-test@local.kumiko`。
 - 支持：标题/摘要自动翻译、手动选区翻译、可复制译文、按页切换原文/译文。
 - 不支持：整页正文翻译、OCR、EPUB、第二阅读器视图和翻译历史管理。
-- Provider：千问 `qwen-mt-plus`、DeepSeek `deepseek-v4-flash`；目标语言为 `zh-CN`。
+- Provider：千问 `qwen-mt-plus`、DeepSeek `deepseek-v4-flash`、Gemini
+  `gemini-2.5-flash`，以及实验性的 Bing、Tencent Transmart、CNKI 免密钥网页接口；
+  目标语言为 `zh-CN`。
+
+Gemini 使用需要 API Key 的官方 Gemini API。Bing、Tencent Transmart 和 CNKI 使用
+网页或内部接口，不是对应厂商承诺稳定性的公开开发者 API；这三个接口不需要用户
+API Key，但可能受到限流、验证码、地区网络和接口变更影响。Provider 失败时不自动
+切换其他服务，调用方应让用户手动重试或选择其他 Provider。API Key 应通过 Zotero
+登录管理器保存，不要写入源码、测试夹具或提交记录。
+
+侧栏提供六个 Provider 的三列模型卡片。新安装或没有有效偏好时显示“未选择模型”，
+不会自动发起翻译；用户选择 Provider 后才会执行翻译。Qwen、DeepSeek 和 Gemini
+显示 API Key 配置区，Bing、Tencent Transmart 和 CNKI 不显示密钥配置区。
+
+模型选择面板支持整体折叠和 Provider 区域折叠；窄栏仍保持三列，极窄时隐藏卡片文字
+并只保留图标。
 
 内部插件 ID 和部分 CSS/本地化标识仍保留历史名称，这是为了兼容已经安装的插件实例，不应仅为“看起来更整齐”而修改。
 
@@ -82,9 +97,23 @@ node --check plugin/translation-service.js
 
 ```powershell
 node tests/translation.test.js
+node tests/translation-providers.test.js
 node tests/bootstrap.test.js
 node tests/front-matter.test.js
 ```
+
+真实网络冒烟测试（只使用固定公开短文本，不读取本地论文；不纳入 CI）：
+
+```powershell
+$env:TRANSLATION_LIVE_TEST = "1"
+node tests/translation-live.test.js
+Remove-Item Env:TRANSLATION_LIVE_TEST
+```
+
+冒烟测试会分别请求 Gemini、Bing、Tencent Transmart 和 CNKI，并输出 Provider、
+状态和耗时；Gemini 需要先设置 `GEMINI_API_KEY`，未设置时会明确跳过该项。任何已
+执行的服务返回空译文、验证码、HTTP 错误或接口结构变化都会导致测试失败。不要在
+该测试中替换为真实论文内容。
 
 包与源码约束测试：
 

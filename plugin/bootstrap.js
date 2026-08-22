@@ -27,6 +27,60 @@ const AUTO_TARGET_LABELS = Object.freeze({
   title: "标题",
   abstract: "摘要"
 });
+const TRANSLATION_PROVIDER_UI = Object.freeze([
+  Object.freeze({
+    id: "qwen-mt",
+    label: "千问 (Qwen)",
+    description: "阿里云通义千问大模型，中文能力优秀。",
+    icon: "icons/qwen-symbol-32.png",
+    fallback: "Q",
+    color: "#2f2d48"
+  }),
+  Object.freeze({
+    id: "deepseek",
+    label: "DeepSeek",
+    description: "深度求索开源大模型，编码推理逻辑清晰。",
+    icon: "icons/deepseek-symbol-32.png",
+    fallback: "D",
+    color: "#2c3552"
+  }),
+  Object.freeze({
+    id: "gemini",
+    label: "Gemini",
+    description: "谷歌推出的多模态AI大模型，性能卓越响应快。",
+    icon: "icons/gemini-symbol-32.svg",
+    fallback: "✦",
+    color: "#202b45"
+  }),
+  Object.freeze({
+    id: "bing",
+    label: "Bing",
+    description: "微软必应免费翻译服务，支持多语种日常翻译。",
+    icon: "icons/bing-symbol-32.svg",
+    fallback: "b",
+    color: "#2d394d"
+  }),
+  Object.freeze({
+    id: "transmart",
+    label: "Transmart",
+    description: "腾讯文言翻译免费版，精准度高，术语识别强。",
+    icon: "icons/transmart-symbol-32.svg",
+    fallback: "T",
+    color: "#24465a"
+  }),
+  Object.freeze({
+    id: "cnki",
+    label: "CNKI (知网)",
+    description: "知网免费学术翻译，专注文献、学术场景。",
+    icon: "icons/cnki-symbol-32.svg",
+    fallback: "知",
+    color: "#553031"
+  })
+]);
+const TRANSLATION_PROVIDER_UI_BY_ID = Object.freeze(
+  Object.fromEntries(TRANSLATION_PROVIDER_UI.map(value => [value.id, value]))
+);
+const PANEL_STYLE_ID = "reader-selection-replacer-test-provider-panel-style";
 
 function createPanelLocalization() {
   const LocalizationConstructor = globalThis.Localization
@@ -3769,7 +3823,7 @@ var SelectionReplacerTest = {
   panelStates: new Set(),
   readerStatus: new Map(),
   credentialState: "unknown",
-  activeProviderID: "deepseek",
+  activeProviderID: "",
   providerStates: new Map(),
   autoSessions: new Map(),
   selectionSessions: new Map(),
@@ -3798,13 +3852,20 @@ var SelectionReplacerTest = {
     this.registerItemPane();
     this.registerReaderListeners();
     Promise.resolve().then(() => {
+      if (!this.activeProviderID) return;
       for (const reader of Zotero.Reader?._readers || []) this.autoMarkReader(reader);
     }).catch(error => Zotero.logError?.(error));
     (Zotero.uiReadyPromise || Promise.resolve())
       .then(async () => {
         this.activeProviderID = globalThis.getActiveTranslationProviderID?.()
           || this.activeProviderID;
-        await this.revalidateProviderKey(this.activeProviderID);
+        if (this.activeProviderID) await this.revalidateProviderKey(this.activeProviderID);
+        const provider = this.getProvider(this.activeProviderID);
+        const providerState = this.activeProviderID
+          ? this.getProviderState(this.activeProviderID) : null;
+        if (provider?.credentialMode === "none" || providerState?.status === "configured") {
+          this.restartActiveReaders();
+        }
         this.refreshAllPanels();
     }).catch(error => Zotero.logError?.(error));
     Zotero.debug?.(`[${PLUGIN_ID}] started v${PLUGIN_VERSION}`);
@@ -4142,20 +4203,14 @@ var SelectionReplacerTest = {
   },
 
   getProvider(providerID = this.activeProviderID) {
+    if (!providerID) return null;
     return globalThis.getTranslationProvider?.(providerID)
       || globalThis.TranslationProviderRegistry?.[providerID]
-      || globalThis.TranslationProviderRegistry?.deepseek
-      || {
-        id: "deepseek",
-        label: "DeepSeek",
-        modelSpec: { model: "deepseek-v4-flash" },
-        credentials: null,
-        requestOptions() { return {}; }
-      };
+      || null;
   },
 
   getProviderState(providerID = this.activeProviderID) {
-    const id = providerID === "qwen-mt" ? "qwen-mt" : "deepseek";
+    const id = String(providerID || "");
     if (!this.providerStates.has(id)) {
       this.providerStates.set(id, {
         status: "missing",
@@ -4275,51 +4330,88 @@ var SelectionReplacerTest = {
     return button;
   },
 
-  makeProviderLogo(doc, providerID) {
-    const isQwen = providerID === "qwen-mt";
+  getProviderUI(providerID) {
+    return TRANSLATION_PROVIDER_UI_BY_ID[providerID] || null;
+  },
+
+  ensureProviderPanelStyle(doc) {
+    const styleParent = doc?.head || doc?.documentElement;
+    if (!doc?.createElement || !styleParent?.append) return;
+    if (doc.getElementById?.(PANEL_STYLE_ID)) return;
+    const style = doc.createElement("style");
+    style.id = PANEL_STYLE_ID;
+    style.textContent = `
+      [data-provider-cards="true"] {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+      [data-provider-card="true"] {
+        min-width: 0;
+      }
+      @media (max-width: 520px) {
+        [data-provider-card="true"] {
+          min-height: 116px !important;
+          padding: 12px !important;
+        }
+        [data-provider-card-label="true"],
+        [data-provider-card-description="true"] {
+          display: none !important;
+        }
+        [data-provider-card-logo="true"] {
+          width: 34px !important;
+          height: 34px !important;
+          flex-basis: 34px !important;
+        }
+      }
+    `;
+    styleParent.append(style);
+  },
+
+  makeProviderLogo(doc, providerID, size = 42) {
+    const metadata = this.getProviderUI(providerID) || {
+      icon: "",
+      fallback: "?"
+    };
     const image = doc.createElement("img");
-    const logoPath = isQwen
-      ? "icons/qwen-symbol-32.png"
-      : "icons/deepseek-symbol-32.png";
-    image.src = `${this.rootURI}${logoPath}`;
+    image.src = `${this.rootURI}${metadata.icon}`;
     this.setPanelAttributes(
       image,
-      isQwen
-        ? "reader-selection-replacer-test-pane-provider-qwen-icon"
-        : "reader-selection-replacer-test-pane-provider-deepseek-icon",
-      { alt: isQwen ? "千问图标" : "DeepSeek 图标" },
+      `reader-selection-replacer-test-pane-provider-${providerID}-icon`,
+      { alt: `${metadata.fallback} 图标` },
       doc
     );
     image.setAttribute("aria-hidden", "true");
     image.setAttribute("data-provider-logo", providerID);
+    image.setAttribute("data-provider-card-logo", "true");
     this.stylePanel(image, {
       display: "block",
-      width: "28px",
-      height: "28px",
+      width: `${size}px`,
+      height: `${size}px`,
       borderRadius: "50%",
       objectFit: "cover",
       boxSizing: "border-box",
       padding: "0",
       overflow: "hidden",
       background: "var(--fill-quaternary, rgba(255,255,255,.9))",
-      flex: "0 0 28px"
+      flex: `0 0 ${size}px`
     });
 
     const fallback = doc.createElement("span");
-    fallback.textContent = isQwen ? "Q" : "D";
+    fallback.textContent = metadata.fallback;
     fallback.setAttribute("aria-hidden", "true");
     fallback.setAttribute("data-provider-logo-fallback", providerID);
     this.stylePanel(fallback, {
       display: "none",
       alignItems: "center",
       justifyContent: "center",
-      width: "28px",
-      height: "28px",
+      width: `${size}px`,
+      height: `${size}px`,
       borderRadius: "50%",
-      flex: "0 0 28px",
+      flex: `0 0 ${size}px`,
       color: "var(--fill-primary, inherit)",
       background: "var(--material-button-hover, rgba(127,127,127,.22))",
-      fontSize: "13px",
+      fontSize: size > 30 ? "18px" : "13px",
       fontWeight: "600"
     });
     image.addEventListener("error", () => {
@@ -4332,27 +4424,87 @@ var SelectionReplacerTest = {
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
-      width: "28px",
-      height: "28px",
-      flex: "0 0 28px"
+      width: `${size}px`,
+      height: `${size}px`,
+      flex: `0 0 ${size}px`
     });
     wrapper.append(image, fallback);
     return wrapper;
   },
 
-  makeProviderButtonContent(doc, providerID, l10nID, fallbackLabel) {
-    const content = doc.createElement("span");
-    this.stylePanel(content, {
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: "8px",
-      whiteSpace: "nowrap"
+  makeProviderCard(doc, metadata) {
+    const button = this.makePanelButton(doc, "");
+    button.dataset.provider = metadata.id;
+    button.setAttribute("aria-pressed", "false");
+    button.setAttribute("data-provider-card", "true");
+    button.setAttribute("aria-label", metadata.label);
+    this.stylePanel(button, {
+      minHeight: "240px",
+      padding: "26px 24px 22px",
+      border: "0",
+      borderRadius: "12px",
+      background: metadata.color,
+      color: "#f2f3f7",
+      textAlign: "left",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "stretch",
+      justifyContent: "space-between",
+      gap: "18px",
+      boxSizing: "border-box",
+      boxShadow: "0 2px 4px rgba(0,0,0,.18)",
+      cursor: "pointer"
     });
-    const label = doc.createElement("span");
-    this.setPanelText(label, l10nID, fallbackLabel, doc);
-    content.append(this.makeProviderLogo(doc, providerID), label);
-    return content;
+
+    const top = doc.createElement("span");
+    this.stylePanel(top, {
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      minHeight: "42px"
+    });
+    const logo = this.makeProviderLogo(doc, metadata.id, 42);
+    const check = doc.createElement("span");
+    check.textContent = "✓";
+    check.setAttribute("aria-hidden", "true");
+    check.setAttribute("data-provider-card-check", metadata.id);
+    this.stylePanel(check, {
+      visibility: "hidden",
+      color: "#f2f3f7",
+      fontSize: "25px",
+      lineHeight: "1",
+      fontWeight: "600"
+    });
+    top.append(logo, check);
+
+    const label = doc.createElement("strong");
+    label.setAttribute("data-provider-card-label", "true");
+    this.setPanelText(label,
+      `reader-selection-replacer-test-pane-provider-${metadata.id}`,
+      metadata.label, doc);
+    this.stylePanel(label, {
+      display: "block",
+      fontSize: "23px",
+      lineHeight: "1.15",
+      fontWeight: "700",
+      letterSpacing: "-.02em"
+    });
+
+    const description = doc.createElement("span");
+    description.setAttribute("data-provider-card-description", "true");
+    this.setPanelText(description,
+      `reader-selection-replacer-test-pane-provider-${metadata.id}-description`,
+      metadata.description, doc);
+    this.stylePanel(description, {
+      display: "block",
+      minHeight: "48px",
+      color: "rgba(242,243,247,.76)",
+      fontSize: "16px",
+      lineHeight: "1.45"
+    });
+
+    button.append(top, label, description);
+    return button;
   },
 
   renderItemPane({ doc, body, item, tabType }) {
@@ -4362,65 +4514,144 @@ var SelectionReplacerTest = {
     }
     body.replaceChildren?.();
 
+    this.ensureProviderPanelStyle(doc);
     const container = doc.createElement("div");
+    container.setAttribute("data-provider-panel", "true");
     this.stylePanel(container, {
       display: "flex",
       flexDirection: "column",
-      gap: "16px",
-      padding: "18px 14px 20px",
+      gap: "0",
+      padding: "0",
       color: "var(--fill-primary, inherit)",
       fontSize: "14px",
       boxSizing: "border-box",
       width: "100%"
     });
 
-
-   const providerButtons = doc.createElement("div");
-    this.stylePanel(providerButtons, {
+    const modelHeader = doc.createElement("button");
+    modelHeader.type = "button";
+    modelHeader.setAttribute("aria-expanded", "true");
+    this.stylePanel(modelHeader, {
       display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
       width: "100%",
+      minHeight: "72px",
+      padding: "14px 16px",
+      border: "0",
+      borderBottom: "1px solid var(--fill-quinary, rgba(0,0,0,.24))",
+      borderRadius: "0",
+      background: "transparent",
+      color: "inherit",
+      font: "inherit",
+      cursor: "pointer"
+    });
+    const modelTitle = doc.createElement("span");
+    this.setPanelText(modelTitle,
+      "reader-selection-replacer-test-pane-model-selection", "选择翻译模型", doc);
+    this.stylePanel(modelTitle, {
+      fontSize: "24px",
+      fontWeight: "700",
+      lineHeight: "1.2"
+    });
+    const modelTitleGroup = doc.createElement("span");
+    this.stylePanel(modelTitleGroup, {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: "12px",
+      minWidth: "0"
+    });
+    const modelIcon = doc.createElement("span");
+    modelIcon.textContent = "▤";
+    modelIcon.setAttribute("aria-hidden", "true");
+    this.stylePanel(modelIcon, {
+      color: "var(--fill-secondary, #aeb0b6)",
+      fontSize: "28px",
+      lineHeight: "1"
+    });
+    modelTitleGroup.append(modelIcon, modelTitle);
+    const modelChevron = doc.createElement("span");
+    modelChevron.textContent = "⌃";
+    modelChevron.setAttribute("aria-hidden", "true");
+    this.stylePanel(modelChevron, { fontSize: "24px", opacity: "0.7" });
+    modelHeader.append(modelTitleGroup, modelChevron);
+
+    const modelContent = doc.createElement("div");
+    this.stylePanel(modelContent, {
+      display: "block",
+      padding: "18px 14px 20px",
+      boxSizing: "border-box"
+    });
+
+    const providerPanel = doc.createElement("div");
+    this.stylePanel(providerPanel, {
+      display: "flex",
+      flexDirection: "column",
       gap: "0",
-      overflow: "hidden",
       border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
-      borderRadius: "8px",
-      background: "var(--material-sidepane, rgba(127,127,127,.06))"
+      borderRadius: "11px",
+      background: "rgba(127,127,127,.03)",
+      overflow: "hidden"
     });
-    const qwenButton = this.makePanelButton(doc, "");
-    const deepSeekButton = this.makePanelButton(doc, "");
-    qwenButton.dataset.provider = "qwen-mt";
-    deepSeekButton.dataset.provider = "deepseek";
-    qwenButton.setAttribute("aria-pressed", "false");
-    deepSeekButton.setAttribute("aria-pressed", "false");
-    qwenButton.append(this.makeProviderButtonContent(
-      doc, "qwen-mt", "reader-selection-replacer-test-pane-provider-qwen", "千问"
-    ));
-    deepSeekButton.append(this.makeProviderButtonContent(
-      doc, "deepseek", "reader-selection-replacer-test-pane-provider-deepseek", "deepseek"
-    ));
-    this.stylePanel(qwenButton, {
-      flex: "1 1 50%",
-      minHeight: "48px",
-      border: "0",
-      borderRight: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
-      borderRadius: "0",
-      background: "transparent",
-      fontSize: "16px",
+    const providerHeader = doc.createElement("button");
+    providerHeader.type = "button";
+    providerHeader.setAttribute("aria-expanded", "true");
+    this.stylePanel(providerHeader, {
       display: "flex",
       alignItems: "center",
-      justifyContent: "center"
-    });
-    this.stylePanel(deepSeekButton, {
-      flex: "1 1 50%",
-      minHeight: "48px",
+      justifyContent: "space-between",
+      width: "100%",
+      minHeight: "82px",
+      padding: "14px 22px",
       border: "0",
+      borderBottom: "1px solid var(--fill-quinary, rgba(0,0,0,.35))",
       borderRadius: "0",
       background: "transparent",
-      fontSize: "16px",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center"
+      color: "inherit",
+      font: "inherit",
+      cursor: "pointer"
     });
-    providerButtons.append(qwenButton, deepSeekButton);
+    const providerTitle = doc.createElement("span");
+    this.stylePanel(providerTitle, {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: "12px",
+      minWidth: "0",
+      color: "var(--fill-secondary, #aeb0b6)",
+      fontSize: "22px",
+      fontWeight: "600"
+    });
+    const providerHeaderLogo = doc.createElement("span");
+    const providerHeaderLabel = doc.createElement("span");
+    providerTitle.append(providerHeaderLogo, providerHeaderLabel);
+    const providerChevron = doc.createElement("span");
+    providerChevron.textContent = "⌃";
+    providerChevron.setAttribute("aria-hidden", "true");
+    this.stylePanel(providerChevron, { fontSize: "24px", opacity: "0.7" });
+    providerHeader.append(providerTitle, providerChevron);
+
+    const providerContent = doc.createElement("div");
+    this.stylePanel(providerContent, {
+      display: "block",
+      padding: "18px 24px 24px"
+    });
+    const providerButtons = doc.createElement("div");
+    providerButtons.setAttribute("data-provider-cards", "true");
+    this.stylePanel(providerButtons, {
+      display: "grid",
+      gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+      gap: "14px"
+    });
+    for (const metadata of TRANSLATION_PROVIDER_UI) {
+      providerButtons.append(this.makeProviderCard(doc, metadata));
+    }
+
+    const divider = doc.createElement("div");
+    this.stylePanel(divider, {
+      height: "1px",
+      margin: "24px 0 20px",
+      background: "var(--fill-quinary, rgba(0,0,0,.42))"
+    });
 
     const inputSection = doc.createElement("div");
     this.stylePanel(inputSection, {
@@ -4491,34 +4722,63 @@ var SelectionReplacerTest = {
     });
     actions.append(resetKey, saveKey);
 
-    container.append(providerButtons, inputSection, actions);
+    providerContent.append(providerButtons, divider, inputSection, actions);
+    providerPanel.append(providerHeader, providerContent);
+    modelContent.append(providerPanel);
+    container.append(modelHeader, modelContent);
     body.append(container);
 
+    const providerCardMap = new Map(
+      [...providerButtons.children].map(button => [button.dataset.provider, button])
+    );
     const state = {
       body,
-     itemID: item?.id || null,
-     tabType,
-     container,
-     providerButtons,
-      qwenButton,
-      deepSeekButton,
+      itemID: item?.id || null,
+      tabType,
+      container,
+      modelHeader,
+      modelIcon,
+      modelContent,
+      providerPanel,
+      providerHeader,
+      providerHeaderLogo,
+      providerHeaderLabel,
+      providerChevron,
+      providerContent,
+      providerButtons,
+      providerCardMap,
+      divider,
       inputSection,
       apiInput,
       statusRow,
       statusLamp,
       apiStatus,
       retryValidation,
+      actions,
       resetKey,
       saveKey,
-      providerID: this.activeProviderID,
+      providerID: this.activeProviderID || "",
       savedKey: "",
       loadToken: 0
     };
+    state.qwenButton = providerCardMap.get("qwen-mt");
+    state.deepSeekButton = providerCardMap.get("deepseek");
     this.panelStates.add(state);
-    qwenButton.addEventListener("click", () =>
-      this.selectProviderForPanels("qwen-mt"));
-    deepSeekButton.addEventListener("click", () =>
-      this.selectProviderForPanels("deepseek"));
+    modelHeader.addEventListener("click", () => {
+      const expanded = modelHeader.getAttribute("aria-expanded") !== "false";
+      modelHeader.setAttribute("aria-expanded", String(!expanded));
+      modelContent.style.display = expanded ? "none" : "block";
+      modelChevron.textContent = expanded ? "⌄" : "⌃";
+    });
+    providerHeader.addEventListener("click", () => {
+      const expanded = providerHeader.getAttribute("aria-expanded") !== "false";
+      providerHeader.setAttribute("aria-expanded", String(!expanded));
+      providerContent.style.display = expanded ? "none" : "block";
+      providerChevron.textContent = expanded ? "⌄" : "⌃";
+    });
+    for (const [providerID, button] of providerCardMap) {
+      button.addEventListener("click", () => this.selectProviderForPanels(providerID));
+    }
     apiInput.addEventListener("input", () => {
       state.inputDirty = true;
       state.maskedPreview = false;
@@ -4528,17 +4788,23 @@ var SelectionReplacerTest = {
     retryValidation.addEventListener("click", () => this.revalidateAPIKey(state));
 
     this.updatePanelState(state);
-    this.loadProviderIntoPanel(state, true);
+    if (this.activeProviderID) this.loadProviderIntoPanel(state, true);
   },
 
   async selectProviderForPanels(providerID) {
-    const id = providerID === "qwen-mt" ? "qwen-mt" : "deepseek";
+    const id = TRANSLATION_PROVIDER_UI_BY_ID[providerID] ? providerID : "";
     this.activeProviderID = globalThis.setActiveTranslationProviderID?.(id) || id;
-    for (const state of [...this.panelStates]) {
+    await Promise.all([...this.panelStates].map(state => {
       state.providerID = this.activeProviderID;
-      this.loadProviderIntoPanel(state, true);
-    }
+      return this.loadProviderIntoPanel(state, true);
+    }));
     this.refreshAllPanels();
+    const provider = this.getProvider(this.activeProviderID);
+    const providerState = this.activeProviderID
+      ? this.getProviderState(this.activeProviderID) : null;
+    if (provider?.credentialMode === "none" || providerState?.status === "configured") {
+      this.restartActiveReaders();
+    }
   },
 
   async loadProviderIntoPanel(state, validate = true) {
@@ -4549,9 +4815,12 @@ var SelectionReplacerTest = {
     state.apiInput.value = "";
     state.inputDirty = false;
     state.maskedPreview = false;
-    this.setProviderState(state.providerID, "missing", "");
+    if (state.providerID) this.setProviderState(state.providerID, "missing", "");
     this.updatePanelState(state);
+    if (!state.providerID) return false;
     const provider = this.getProvider(state.providerID);
+    if (!provider) return false;
+    if (provider.credentialMode === "none") return true;
     const credentials = provider.credentials;
     if (!credentials?.getKey) return false;
     let apiKey = "";
@@ -4576,6 +4845,7 @@ var SelectionReplacerTest = {
 
   async revalidateProviderKey(providerID = this.activeProviderID) {
     const provider = this.getProvider(providerID);
+    if (!provider) return false;
     const credentials = provider.credentials;
     const state = this.setProviderState(provider.id, "missing", "");
     if (!credentials?.getKey) return false;
@@ -4606,6 +4876,7 @@ var SelectionReplacerTest = {
   async saveAPIKeyFromPanel(state) {
     if (!state) return false;
     const provider = this.getProvider(state.providerID);
+    if (!provider || provider.credentialMode !== "api-key") return false;
     const credentials = provider.credentials;
     const inputKey = state.inputDirty
       ? String(state.apiInput?.value || "").trim()
@@ -4624,6 +4895,7 @@ var SelectionReplacerTest = {
   async revalidateAPIKey(state = null, options = {}) {
     const providerID = state?.providerID || this.activeProviderID;
     const provider = this.getProvider(providerID);
+    if (!provider || provider.credentialMode !== "api-key") return false;
     const credentials = provider.credentials;
     const inputKey = state?.inputDirty
       ? String(state.apiInput?.value || "").trim()
@@ -4660,7 +4932,8 @@ var SelectionReplacerTest = {
       if (state) this.setPanelMessage(state,
         provider.label + " API Key 验证成功。", false);
       this.refreshAllPanels();
-      this.restartFailedAutoSessions();
+      if (shouldSave) this.restartActiveReaders();
+      else this.restartFailedAutoSessions();
       return true;
     }
     catch (error) {
@@ -4676,6 +4949,7 @@ var SelectionReplacerTest = {
   async removeAPIKey(state = null) {
     const providerID = state?.providerID || this.activeProviderID;
     const provider = this.getProvider(providerID);
+    if (!provider || provider.credentialMode !== "api-key") return false;
     const confirmed = Services.prompt?.confirm
       ? Services.prompt.confirm(null, "Translator for Zotero", "确定删除当前模型的 API Key？")
       : true;
@@ -4712,25 +4986,62 @@ var SelectionReplacerTest = {
     }
   },
 
+  restartActiveReaders() {
+    if (!this.activeProviderID) return;
+    for (const reader of Zotero.Reader?._readers || []) {
+      const session = this.autoSessions.get(reader);
+      if (session) session.cancelled = true;
+      this.autoSessions.delete(reader);
+      this.autoMarkReader(reader, { force: true }).catch(error => Zotero.logError?.(error));
+    }
+  },
+
   updatePanelState(state) {
     if (!state) return;
-    const provider = this.getProvider(state.providerID || this.activeProviderID);
-    const providerState = this.getProviderState(state.providerID || this.activeProviderID);
-    const isQwen = provider.id === "qwen-mt";
-    state.qwenButton.setAttribute("aria-pressed", String(isQwen));
-    state.deepSeekButton.setAttribute("aria-pressed", String(!isQwen));
-    state.qwenButton.style.background = isQwen
-      ? "var(--material-button-hover, rgba(0,0,0,.12))" : "transparent";
-    state.deepSeekButton.style.background = isQwen
-      ? "transparent" : "var(--material-button-hover, rgba(0,0,0,.12))";
+    const doc = state.container?.ownerDocument || state.body?.ownerDocument;
+    const providerID = state.providerID || this.activeProviderID || "";
+    const provider = this.getProvider(providerID);
+    const metadata = this.getProviderUI(providerID);
+    const providerState = provider ? this.getProviderState(providerID)
+      : { status: "missing", message: "" };
+    for (const [cardID, button] of state.providerCardMap || []) {
+      const selected = cardID === providerID;
+      const card = this.getProviderUI(cardID);
+      button.setAttribute("aria-pressed", String(selected));
+      button.style.border = selected ? "2px solid rgba(255,255,255,.82)" : "0";
+      button.style.padding = selected ? "24px 22px 20px" : "26px 24px 22px";
+      button.style.background = card?.color || "var(--material-button, transparent)";
+      button.style.boxShadow = selected
+        ? "0 0 0 2px rgba(255,255,255,.18), 0 2px 5px rgba(0,0,0,.24)"
+        : "0 2px 4px rgba(0,0,0,.18)";
+      const check = button.children?.[0]?.children?.[1];
+      if (check) check.style.visibility = selected ? "visible" : "hidden";
+    }
+    state.providerHeaderLogo.replaceChildren?.();
+    if (metadata) {
+      state.providerHeaderLogo.append(this.makeProviderLogo(doc, providerID, 42));
+      this.setPanelText(state.providerHeaderLabel,
+        `reader-selection-replacer-test-pane-provider-${providerID}`,
+        metadata.label, doc);
+      state.providerHeaderLabel.style.color = "inherit";
+    }
+    else {
+      this.setPanelText(state.providerHeaderLabel,
+        "reader-selection-replacer-test-pane-no-provider", "未选择模型",
+        doc);
+      state.providerHeaderLabel.style.color = "var(--fill-secondary, #aeb0b6)";
+    }
+    const keyedProvider = provider?.credentialMode === "api-key";
+    state.divider.style.display = keyedProvider ? "block" : "none";
+    state.inputSection.style.display = keyedProvider ? "flex" : "none";
+    state.actions.style.display = keyedProvider ? "flex" : "none";
     const editing = Boolean(state.inputDirty);
     const hasSavedKey = Boolean(state.savedKey);
-    const inputL10nID = isQwen
-      ? "reader-selection-replacer-test-pane-api-key-qwen"
-      : "reader-selection-replacer-test-pane-api-key-deepseek";
+    const inputL10nID = providerID
+      ? `reader-selection-replacer-test-pane-api-key-${providerID}` : "";
     this.setPanelAttributes(state.apiInput, inputL10nID, {
-      placeholder: isQwen ? "输入千问 API Key" : "输入 DeepSeek API Key",
-      "aria-label": isQwen ? "千问 API Key" : "DeepSeek API Key"
+      placeholder: provider ? `输入${provider.label} API Key` : "",
+      "aria-label": provider ? `${provider.label} API Key` : ""
     });
     if (hasSavedKey && !editing) {
       state.apiInput.readOnly = true;
@@ -4748,13 +5059,14 @@ var SelectionReplacerTest = {
       state.maskedPreview = false;
     }
     state.apiInput.setAttribute("aria-readonly", String(Boolean(state.apiInput.readOnly)));
-    state.apiStatus.textContent = this.providerStatusText(provider, providerState);
+    state.apiStatus.textContent = provider
+      ? this.providerStatusText(provider, providerState) : "";
     state.statusLamp.style.background = this.providerStatusColor(providerState.status);
     state.retryValidation.style.visibility =
-      providerState.status === "invalid" ? "visible" : "hidden";
+      keyedProvider && providerState.status === "invalid" ? "visible" : "hidden";
     state.retryValidation.disabled = providerState.status === "validating";
-    state.saveKey.disabled = providerState.status === "validating";
-    state.resetKey.disabled = providerState.status === "validating";
+    state.saveKey.disabled = !keyedProvider || providerState.status === "validating";
+    state.resetKey.disabled = !keyedProvider || providerState.status === "validating";
   },
 
   formatAutoTargetStatus(session, kind) {
@@ -4849,6 +5161,10 @@ var SelectionReplacerTest = {
 
   async autoMarkReader(reader, options = {}) {
     if (!reader) return null;
+    if (!this.activeProviderID) {
+      this.setReaderStatus(reader, "请先选择翻译模型");
+      return null;
+    }
     const config = typeof options === "boolean" ? { force: options } : (options || {});
     const force = Boolean(config.force);
     const targetKinds = Array.isArray(config.targetKinds) && config.targetKinds.length
@@ -4973,6 +5289,10 @@ var SelectionReplacerTest = {
   },
 
   async translateSelection(reader, annotation, sourceText, status, button) {
+    if (!this.activeProviderID) {
+      status.textContent = "请先选择翻译模型";
+      return;
+    }
     const position = copyPosition(annotation?.position)
       || copyPosition(reader?._internalReader?.getSelectionPosition?.());
     const view = reader?._internalReader?._primaryView || null;
@@ -5099,30 +5419,50 @@ var SelectionReplacerTest = {
     container.style.gap = "6px";
     container.style.padding = "8px 0 0";
 
-    const button = doc.createElement("button");
-    button.type = "button";
-    button.textContent = "翻译";
-    button.title = "翻译当前选区中识别到的段落";
-    button.setAttribute("aria-label", button.title);
-    button.style.display = "block";
-    button.style.boxSizing = "border-box";
-    button.style.width = "calc(100% - 64px)";
-    button.style.maxWidth = "220px";
-    button.style.height = "42px";
-    button.style.minHeight = "42px";
-    button.style.maxHeight = "42px";
-    button.style.margin = "0 auto";
-    button.style.padding = "2px 10px";
-    button.style.border = "1px solid var(--fill-quinary, rgba(255,255,255,.28))";
-    button.style.borderRadius = "8px";
-    button.style.background = "var(--material-button, rgba(127,127,127,.12))";
-    button.style.color = "var(--fill-primary, #f4f4f4)";
-    button.style.font = "inherit";
-    button.style.fontSize = "14px";
-    button.style.lineHeight = "1.2";
-    button.style.textAlign = "center";
-    button.style.cursor = "pointer";
-    button.style.appearance = "none";
+    const buttonRow = doc.createElement("div");
+    buttonRow.style.display = "flex";
+    buttonRow.style.width = "calc(100% - 32px)";
+    buttonRow.style.maxWidth = "440px";
+    buttonRow.style.gap = "6px";
+    buttonRow.style.margin = "0 auto";
+
+    const makeTranslationButton = (label, title) => {
+      const button = doc.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.title = title;
+      button.setAttribute("aria-label", title);
+      button.style.display = "block";
+      button.style.boxSizing = "border-box";
+      button.style.flex = "1 1 0";
+      button.style.minWidth = "0";
+      button.style.width = "auto";
+      button.style.height = "42px";
+      button.style.minHeight = "42px";
+      button.style.maxHeight = "42px";
+      button.style.margin = "0";
+      button.style.padding = "2px 10px";
+      button.style.border = "1px solid var(--fill-quinary, rgba(255,255,255,.28))";
+      button.style.borderRadius = "8px";
+      button.style.background = "var(--material-button, rgba(127,127,127,.12))";
+      button.style.color = "var(--fill-primary, #f4f4f4)";
+      button.style.font = "inherit";
+      button.style.fontSize = "14px";
+      button.style.lineHeight = "1.2";
+      button.style.textAlign = "center";
+      button.style.cursor = "pointer";
+      button.style.appearance = "none";
+      return button;
+    };
+
+    const button = makeTranslationButton("翻译", "翻译当前选区中识别到的段落");
+    const forceSingleButton = makeTranslationButton(
+      "翻译（强制单段）", "强制单段翻译接口预留，暂未启用"
+    );
+    forceSingleButton.disabled = true;
+    forceSingleButton.setAttribute("data-translation-mode", "force-single-segment");
+    forceSingleButton.setAttribute("aria-disabled", "true");
+    buttonRow.append(button, forceSingleButton);
 
     const status = doc.createElement("span");
     status.style.fontSize = "11px";
@@ -5139,7 +5479,7 @@ var SelectionReplacerTest = {
         });
     });
 
-    container.append(button, status);
+    container.append(buttonRow, status);
     append(container);
   }
 };

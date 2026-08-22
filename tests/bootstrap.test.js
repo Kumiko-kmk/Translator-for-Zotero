@@ -104,12 +104,14 @@ const overlay = context.SelectionReplacerOverlay;
     children: [],
     style: {},
     dataset: {},
+    attributes: {},
     textContent: "",
     value: "",
     isConnected: true,
     append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
-    setAttribute(name, value) { this[name] = value; },
+    setAttribute(name, value) { this.attributes[name] = String(value); this[name] = value; },
+    getAttribute(name) { return this.attributes[name] ?? null; },
     addEventListener(name, handler) { this["on" + name] = handler; }
   });
   const doc = {
@@ -122,38 +124,43 @@ const overlay = context.SelectionReplacerOverlay;
   const body = makeElement("body");
   replacerTest.panelStates.clear();
   replacerTest.providerStates.clear();
-  replacerTest.activeProviderID = "deepseek";
+  replacerTest.activeProviderID = "";
   replacerTest.renderItemPane({ doc, body, item: { id: 1 }, tabType: "reader" });
   const panel = [...replacerTest.panelStates][0];
   assert.ok(panel);
-  assert.strictEqual(panel.providerButtons.children.length, 2);
-  const qwenContent = panel.qwenButton.children[0];
-  const deepSeekContent = panel.deepSeekButton.children[0];
-  assert.strictEqual(qwenContent.children[1].textContent, "千问");
-  assert.strictEqual(deepSeekContent.children[1].textContent, "deepseek");
-  const qwenLogo = qwenContent.children[0].children[0];
-  const qwenLogoFallback = qwenContent.children[0].children[1];
-  const deepSeekLogo = deepSeekContent.children[0].children[0];
+  assert.strictEqual(panel.providerButtons.children.length, 6);
+  assert.strictEqual(panel.providerHeaderLabel.textContent, "未选择模型");
+  assert.strictEqual(panel.providerHeaderLogo.children.length, 0);
+  assert.strictEqual(panel.inputSection.style.display, "none");
+  assert.strictEqual(panel.actions.style.display, "none");
+  assert.strictEqual(panel.divider.style.display, "none");
+  const qwenButton = panel.providerCardMap.get("qwen-mt");
+  const deepSeekButton = panel.providerCardMap.get("deepseek");
+  const geminiButton = panel.providerCardMap.get("gemini");
+  const bingButton = panel.providerCardMap.get("bing");
+  assert.strictEqual(qwenButton.children[1].textContent, "千问 (Qwen)");
+  assert.strictEqual(deepSeekButton.children[1].textContent, "DeepSeek");
+  assert.strictEqual(geminiButton.children[1].textContent, "Gemini");
+  assert.strictEqual(bingButton.children[1].textContent, "Bing");
+  const qwenLogo = qwenButton.children[0].children[0].children[0];
+  const qwenLogoFallback = qwenButton.children[0].children[0].children[1];
+  const deepSeekLogo = deepSeekButton.children[0].children[0].children[0];
   assert.strictEqual(qwenLogo.src, "icons/qwen-symbol-32.png");
   assert.strictEqual(deepSeekLogo.src, "icons/deepseek-symbol-32.png");
   assert.strictEqual(qwenLogo.style.borderRadius, "50%");
   assert.strictEqual(deepSeekLogo.style.borderRadius, "50%");
-  assert.strictEqual(qwenLogo.style.width, "28px");
-  assert.strictEqual(deepSeekLogo.style.width, "28px");
-  assert.strictEqual(qwenLogo.style.height, "28px");
-  assert.strictEqual(deepSeekLogo.style.height, "28px");
-  assert.strictEqual(qwenLogo.style.flex, "0 0 28px");
-  assert.strictEqual(deepSeekLogo.style.flex, "0 0 28px");
+  assert.strictEqual(qwenLogo.style.width, "42px");
+  assert.strictEqual(deepSeekLogo.style.width, "42px");
+  assert.strictEqual(qwenLogo.style.height, "42px");
+  assert.strictEqual(deepSeekLogo.style.height, "42px");
+  assert.strictEqual(qwenLogo.style.flex, "0 0 42px");
+  assert.strictEqual(deepSeekLogo.style.flex, "0 0 42px");
   assert.strictEqual(qwenLogo.style.objectFit, "cover");
   assert.strictEqual(deepSeekLogo.style.objectFit, "cover");
   assert.strictEqual(qwenLogo.style.padding, "0");
   assert.strictEqual(deepSeekLogo.style.padding, "0");
   assert.strictEqual(qwenLogo.style.overflow, "hidden");
   assert.strictEqual(deepSeekLogo.style.overflow, "hidden");
-  assert.strictEqual(panel.qwenButton.style.flex, "1 1 50%");
-  assert.strictEqual(panel.deepSeekButton.style.flex, "1 1 50%");
-  assert.strictEqual(panel.qwenButton.style.justifyContent, "center");
-  assert.strictEqual(panel.deepSeekButton.style.justifyContent, "center");
   qwenLogo.onerror();
   assert.strictEqual(qwenLogo.style.display, "none");
   assert.strictEqual(qwenLogoFallback.style.display, "inline-flex");
@@ -162,9 +169,23 @@ const overlay = context.SelectionReplacerOverlay;
   assert.strictEqual(panel.saveKey.textContent, "保存");
   assert.strictEqual(panel.resetKey.textContent, "重置");
   assert.strictEqual(replacerTest.maskAPIKey("deepseek-secret"), "deep********ret");
-  assert.strictEqual(panel.container.children.length, 3);
+  assert.strictEqual(panel.container.children.length, 2);
   assert.strictEqual("message" in panel, false);
   assert.strictEqual(panel.statusRow.children.length, 3);
+
+  bingButton.onclick();
+  assert.strictEqual(replacerTest.activeProviderID, "bing");
+  assert.strictEqual(panel.providerID, "bing");
+  assert.strictEqual(panel.inputSection.style.display, "none");
+  assert.strictEqual(panel.actions.style.display, "none");
+  assert.strictEqual(panel.providerHeaderLabel.textContent, "Bing");
+
+  geminiButton.onclick();
+  assert.strictEqual(replacerTest.activeProviderID, "gemini");
+  assert.strictEqual(panel.providerID, "gemini");
+  assert.strictEqual(panel.inputSection.style.display, "flex");
+  assert.strictEqual(panel.actions.style.display, "flex");
+  assert.strictEqual(panel.providerHeaderLabel.textContent, "Gemini");
 
   panel.savedKey = "sk-example-secret-f2c";
   panel.inputDirty = false;
@@ -182,9 +203,8 @@ const overlay = context.SelectionReplacerOverlay;
   assert.strictEqual(panel.apiInput.readOnly, false);
   assert.strictEqual(panel.apiInput.type, "password");
   assert.strictEqual(panel.apiInput.value, "");
-  panel.qwenButton.onclick();
-  assert.strictEqual(replacerTest.activeProviderID, "qwen-mt");
-  assert.strictEqual(panel.providerID, "qwen-mt");
+  assert.strictEqual(panel.providerButtons.style.gridTemplateColumns,
+    "repeat(3, minmax(0, 1fr))");
 }
 
 function makeFixture(paragraphLineCounts) {
@@ -1060,21 +1080,30 @@ assert.strictEqual(
   assert.strictEqual(appended.length, 1);
   assert.strictEqual(created.some(element => element.tagName === "INPUT"), false);
   assert.strictEqual(appended[0].children.length, 2);
-  assert.strictEqual(appended[0].children[0].textContent, "翻译");
-  assert.match(appended[0].children[0].title, /翻译/u);
+  const buttonRow = appended[0].children[0];
+  const translateButton = buttonRow.children[0];
+  const forceSingleButton = buttonRow.children[1];
+  assert.strictEqual(buttonRow.children.length, 2);
+  assert.strictEqual(translateButton.textContent, "翻译");
+  assert.match(translateButton.title, /翻译/u);
+  assert.strictEqual(forceSingleButton.textContent, "翻译（强制单段）");
+  assert.strictEqual(forceSingleButton.disabled, true);
+  assert.strictEqual(forceSingleButton["data-translation-mode"], "force-single-segment");
+  assert.match(forceSingleButton.title, /暂未启用/u);
   assert.strictEqual(appended[0].style.flexDirection, "column");
   assert.strictEqual(appended[0].style.alignItems, "center");
-  assert.strictEqual(appended[0].children[0].style.margin, "0 auto");
-  assert.strictEqual(appended[0].children[0].style.borderRadius, "8px");
-  assert.strictEqual(appended[0].children[0].style.maxWidth, "220px");
-  assert.strictEqual(appended[0].children[0].style.width, "calc(100% - 64px)");
-  assert.strictEqual(appended[0].children[0].style.height, "42px");
-  assert.strictEqual(appended[0].children[0].style.minHeight, "42px");
-  assert.strictEqual(appended[0].children[0].style.maxHeight, "42px");
-  assert.strictEqual(appended[0].children[0].style.padding, "2px 10px");
-  assert.strictEqual(appended[0].children[0].style.border,
+  assert.strictEqual(buttonRow.style.margin, "0 auto");
+  assert.strictEqual(buttonRow.style.display, "flex");
+  assert.strictEqual(translateButton.style.borderRadius, "8px");
+  assert.strictEqual(translateButton.style.flex, "1 1 0");
+  assert.strictEqual(translateButton.style.width, "auto");
+  assert.strictEqual(translateButton.style.height, "42px");
+  assert.strictEqual(translateButton.style.minHeight, "42px");
+  assert.strictEqual(translateButton.style.maxHeight, "42px");
+  assert.strictEqual(translateButton.style.padding, "2px 10px");
+  assert.strictEqual(translateButton.style.border,
     "1px solid var(--fill-quinary, rgba(255,255,255,.28))");
-  assert.strictEqual(appended[0].children[0].style.fontSize, "14px");
+  assert.strictEqual(translateButton.style.fontSize, "14px");
 }
 
 {

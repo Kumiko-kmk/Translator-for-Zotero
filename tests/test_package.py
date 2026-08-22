@@ -18,6 +18,10 @@ PACKAGED_FILES = {
     "icons/translator-for-zotero.png",
     "icons/qwen-symbol-32.png",
     "icons/deepseek-symbol-32.png",
+    "icons/gemini-symbol-32.svg",
+    "icons/bing-symbol-32.svg",
+    "icons/transmart-symbol-32.svg",
+    "icons/cnki-symbol-32.svg",
     "locale/en-US/reader-selection-replacer-test.ftl",
     "locale/zh-CN/reader-selection-replacer-test.ftl",
 }
@@ -83,7 +87,29 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "TranslationModelRegistry" in translation_source
     assert "TranslationProviderRegistry" in translation_source
     assert "QwenCredentials" in translation_source
+    assert 'GEMINI_PROVIDER = "gemini"' in translation_source
+    assert 'BING_PROVIDER = "bing"' in translation_source
+    assert 'TRANSMART_PROVIDER = "transmart"' in translation_source
+    assert 'CNKI_PROVIDER = "cnki"' in translation_source
+    assert 'credentialMode: "none"' in translation_source
+    assert "GeminiCredentials" in translation_source
+    assert "GeminiTranslationClient" in translation_source
+    assert "BingTranslationClient" in translation_source
+    assert "TransmartTranslationClient" in translation_source
+    assert "CNKITranslationClient" in translation_source
+    assert "GEMINI_BASE_URL" in translation_source
+    assert "generativelanguage.googleapis.com" in translation_source
+    assert "generateContent" in translation_source
+    assert '"x-goog-api-key"' in translation_source
+    assert 'GEMINI_MODEL = "gemini-2.5-flash"' in translation_source
+    assert "BING_TRANSLATE_BASE_URL" in translation_source
+    assert "transmart.qq.com/api/imt" in translation_source
+    assert "dict.cnki.net/fyzs-front-api/translate/literaltranslation" in translation_source
+    assert "aes128EcbEncrypt" in translation_source
     assert "activeTranslationProvider" in translation_source
+    assert "GOOGLE_PROVIDER" not in translation_source
+    assert "GoogleTranslationClient" not in translation_source
+    assert "/translate_a/single" not in translation_source
     assert "QwenMTPlusTranslationClient" in translation_source
     assert "QWEN_MT_PLUS_MODEL" in translation_source
     assert '"qwen-mt-plus"' in translation_source
@@ -94,10 +120,18 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "translation_options" in translation_source
     assert "requestOptions" in translation_source
     assert "maskAPIKey" in source
-    assert "reader-selection-replacer-test-pane-provider-qwen" in source
-    assert "reader-selection-replacer-test-pane-provider-deepseek" in source
+    assert "TRANSLATION_PROVIDER_UI" in source
+    for provider_id in ["qwen-mt", "deepseek", "gemini", "bing", "transmart", "cnki"]:
+        assert f'"{provider_id}"' in source
+    assert "reader-selection-replacer-test-pane-provider-${providerID}" in source
     assert "icons/qwen-symbol-32.png" in source
     assert "icons/deepseek-symbol-32.png" in source
+    assert "icons/gemini-symbol-32.svg" in source
+    assert "icons/bing-symbol-32.svg" in source
+    assert "icons/transmart-symbol-32.svg" in source
+    assert "icons/cnki-symbol-32.svg" in source
+    assert 'NO_ACTIVE_TRANSLATION_PROVIDER = "none"' in translation_source
+    assert 'code: "no-provider"' in translation_source
     assert "icons/qwen-20.png" not in source
     assert "icons/deepseek-20.png" not in source
     assert "makeProviderLogo" in source
@@ -113,7 +147,9 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "getSelectionPosition" in source
     assert "getClientRect" in source
     assert "reader-selection-replacer-test-layer" in source
-    assert 'button.textContent = "翻译"' in source
+    assert 'makeTranslationButton("翻译"' in source
+    assert '"翻译（强制单段）"' in source
+    assert 'data-translation-mode", "force-single-segment"' in source
     assert "DEFAULT_REPLACEMENT" not in source
     assert "replaceSelection" not in source
     assert "SelectionMatcher" in source
