@@ -1,6 +1,6 @@
 # Translator for Zotero 开发与交接
 
-本文档用于在另一台电脑上继续开发、测试和发布 Translator for Zotero。用户使用说明位于仓库根目录 [README.md](../README.md)，版本变化见 [CHANGELOG.md](../CHANGELOG.md)。
+本文档用于在另一台电脑上继续开发和发布 Translator for Zotero。用户使用说明位于仓库根目录 [README.md](../README.md)，架构与模块交接见 [HANDOFF.md](HANDOFF.md)，版本变化见 [CHANGELOG.md](../CHANGELOG.md)。
 
 ## 产品边界
 
@@ -34,7 +34,6 @@ API Key，但可能受到限流、验证码、地区网络和接口变更影响�
 
 - Git；
 - Node.js 20 或更高版本；
-- Python 3.11 或更高版本；
 - PowerShell 7 或 Windows PowerShell；
 - Zotero 9.x，用于人工验收；
 - GitHub CLI，可选，用于发布流程。
@@ -42,29 +41,33 @@ API Key，但可能受到限流、验证码、地区网络和接口变更影响�
 ```powershell
 git clone https://github.com/Kumiko-kmk/Translator-for-Zotero.git
 Set-Location Translator-for-Zotero
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements-dev.txt
 ```
 
-macOS/Linux 使用 `source .venv/bin/activate`。插件 JavaScript 不依赖 npm 包，因此无需执行 `npm install`。
+插件 JavaScript 不依赖 npm 包，因此无需执行 `npm install`。
 
 ## 目录与职责
 
 | 路径 | 职责 |
 | --- | --- |
-| `plugin/bootstrap.js` | 插件生命周期、侧栏、选区捕获、覆盖层、分页显示状态和排版 |
-| `plugin/page-data-body-extractor.js` | 首页标题/摘要、视觉行、单双栏和段落分析 |
+| `plugin/bootstrap.js` | Zotero Bootstrap 生命周期与模块加载顺序 |
+| `plugin/core.js` | 插件常量、Provider UI 元数据、本地化及位置通用工具 |
+| `plugin/app-controller.js` | 应用状态、Reader 监听、侧栏注册和各控制器组合 |
+| `plugin/front-matter-extractor.js` | 首页标题/摘要、视觉行、单双栏和段落分析 |
+| `plugin/reader-target-locator.js` | 父条目元数据读取及标题/摘要目标定位 |
+| `plugin/page-text-index.js` | PDF 页面文字索引、坐标投影和视口缩放转换 |
+| `plugin/selection-block.js` | 选区跨页、单双栏分组和段落边界分析 |
 | `plugin/content-segments.js` | 标题、摘要与选区文本的统一分段对象 |
 | `plugin/translation-service.js` | Provider、密钥、请求、校验和翻译缓存 |
+| `plugin/overlay-layout.js` | 覆盖块几何分组、译文分配、字号和行距测量 |
+| `plugin/overlay-renderer.js` | 覆盖层 DOM、原文/译文切换和状态渲染 |
+| `plugin/reader-overlay.js` | 覆盖层状态、页面窗口、事件绑定和增量重绘 |
+| `plugin/provider-panel.js` | Provider 卡片、密钥配置、结果预览和复制交互 |
+| `plugin/translation-workflows.js` | 标题/摘要自动翻译及手动选区翻译工作流 |
 | `plugin/manifest.json` | 发布版本、插件 ID 和 Zotero 兼容范围的唯一来源 |
 | `plugin/icons/`、`plugin/locale/` | 插件图标与中英文界面字符串 |
-| `tests/*.test.js` | 无真实网络请求的 JavaScript 回归测试 |
-| `tests/test_package.py` | 源码约束、XPI 文件清单和逐字节包内容检查 |
 | `tools/build_xpi.ps1` | 唯一受支持的 XPI 构建与验包入口 |
+| `docs/HANDOFF.md` | 运行架构、模块依赖、状态所有权与维护边界 |
 | `docs/images/` | GitHub README 图示，不打入 XPI |
-| `.github/workflows/ci.yml` | PR 与 main 的持续集成 |
 
 发布二进制不提交进 Git。`dist/` 是本地临时输出目录，正式附件只发布到 GitHub Releases。
 
@@ -74,7 +77,6 @@ macOS/Linux 使用 `source .venv/bin/activate`。插件 JavaScript 不依赖 npm
 - 成功译文缓存在 Zotero 数据目录的 `paper-assistant-segment-translations.sqlite`。
 - 缓存按 Provider、模型、提示词版本、原文和目标语言隔离。
 - PDF 必须带文字层；扫描件需先由外部工具 OCR。
-- 测试不得调用真实千问或 DeepSeek API，也不得包含真实密钥。
 
 ## 开发检查
 
@@ -87,41 +89,10 @@ git status -sb
 JavaScript 语法检查：
 
 ```powershell
-node --check plugin/bootstrap.js
-node --check plugin/content-segments.js
-node --check plugin/page-data-body-extractor.js
-node --check plugin/translation-service.js
+Get-ChildItem plugin -Filter *.js | ForEach-Object { node --check $_.FullName }
 ```
 
-正式 Node 回归：
-
-```powershell
-node tests/translation.test.js
-node tests/translation-providers.test.js
-node tests/bootstrap.test.js
-node tests/front-matter.test.js
-```
-
-真实网络冒烟测试（只使用固定公开短文本，不读取本地论文；不纳入 CI）：
-
-```powershell
-$env:TRANSLATION_LIVE_TEST = "1"
-node tests/translation-live.test.js
-Remove-Item Env:TRANSLATION_LIVE_TEST
-```
-
-冒烟测试会分别请求 Gemini、Bing、Tencent Transmart 和 CNKI，并输出 Provider、
-状态和耗时；Gemini 需要先设置 `GEMINI_API_KEY`，未设置时会明确跳过该项。任何已
-执行的服务返回空译文、验证码、HTTP 错误或接口结构变化都会导致测试失败。不要在
-该测试中替换为真实论文内容。
-
-包与源码约束测试：
-
-```powershell
-python -m pytest
-```
-
-所有 Provider 请求均由伪客户端替代。测试失败时应修复实现或测试夹具，不要删除关键断言来规避失败。
+完成语法检查后，使用固定构建脚本生成 XPI，再通过 Zotero 人工验收运行效果。
 
 ## 排版与性能约束
 
@@ -148,7 +119,7 @@ python -m pytest
 脚本会：
 
 1. 从 `plugin/manifest.json` 读取版本；
-2. 核对 `bootstrap.js` 内版本；
+2. 核对 `core.js` 内版本；
 3. 验证插件 ID、更新地址和 Zotero 兼容范围；
 4. 仅打包固定运行文件，不包含 README、测试、截图或临时文件；
 5. 检查 XPI 根目录和文件清单；
@@ -179,14 +150,14 @@ dist/Translator-for-Zotero-<manifest-version>.xpi
 
 ## 发布流程
 
-1. 更新 `plugin/manifest.json`、`plugin/bootstrap.js`、README、CHANGELOG 和版本断言。
-2. 运行全部语法检查、Node 测试和 `pytest`。
-3. 使用 `tools/build_xpi.ps1` 生成 XPI并记录 SHA-256。
+1. 更新 `plugin/manifest.json`、`plugin/core.js`、README、CHANGELOG 和版本断言。
+2. 运行全部 JavaScript 语法检查。
+3. 使用 `tools/build_xpi.ps1` 生成 XPI 并记录 SHA-256。
 4. 检查 `git status`、`git diff --check`，只提交本次范围。
-5. 推送发布分支，创建 PR，等待 CI 通过并合并到 `main`。
-6. 从合并后的 `main` 创建带注释标签，例如 `v1.2.0`。
-7. 创建 GitHub Release，将 `dist/` 中对应 XPI作为附件上传。
-8. 从 Release 下载附件再次安装，完成最终烟雾测试。
+5. 推送发布分支，创建 PR，人工检查后合并到 `main`。
+6. 从合并后的 `main` 创建带注释标签，例如 `v2.0.0`。
+7. 创建 GitHub Release，将 `dist/` 中对应 XPI 作为附件上传。
+8. 从 Release 下载附件再次安装，完成最终人工验收。
 
 ```powershell
 git status -sb
@@ -195,8 +166,9 @@ git add <明确文件列表>
 git commit -m "release: Translator for Zotero x.y.z"
 git push -u origin <release-branch>
 gh pr create --base main --head <release-branch>
-gh pr checks <pr-number> --watch
 gh pr merge <pr-number> --merge --delete-branch
+git switch main
+git pull --ff-only origin main
 git tag -a vx.y.z -m "Translator for Zotero x.y.z"
 git push origin vx.y.z
 gh release create vx.y.z dist/Translator-for-Zotero-x.y.z.xpi
@@ -214,4 +186,4 @@ gh release create vx.y.z dist/Translator-for-Zotero-x.y.z.xpi
 
 ## 交接完成标准
 
-另一台电脑能够从全新克隆开始，完成依赖安装、全部测试、XPI 构建、Zotero 安装和至少一次测试密钥翻译，即视为环境交接完成。交接时同时提供目标提交、Release 地址、XPI SHA-256、已知限制和未完成 Issue。
+另一台电脑能够从全新克隆开始，完成基础语法检查、XPI 构建、Zotero 安装和至少一次人工翻译验收，即视为环境交接完成。交接时同时提供目标提交、Release 地址、XPI SHA-256、已知限制和未完成 Issue。
