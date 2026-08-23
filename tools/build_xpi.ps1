@@ -27,21 +27,29 @@ if ($zoteroManifest.strict_min_version -ne "9.0" -or
     throw "Zotero compatibility must be 9.0 through 9.*."
 }
 
-$bootstrapPath = Join-Path $sourceDir "bootstrap.js"
-$bootstrap = Get-Content -LiteralPath $bootstrapPath -Raw -Encoding UTF8
+$corePath = Join-Path $sourceDir "core.js"
+$core = Get-Content -LiteralPath $corePath -Raw -Encoding UTF8
 $versionDeclaration = 'const PLUGIN_VERSION = "' + [regex]::Escape($version) + '";'
-if ($bootstrap -notmatch $versionDeclaration) {
-    throw "bootstrap.js PLUGIN_VERSION does not match manifest version $version."
+if ($core -notmatch $versionDeclaration) {
+    throw "core.js PLUGIN_VERSION does not match manifest version $version."
 }
 
 $packageFiles = @(
     "manifest.json",
     "bootstrap.js",
+    "core.js",
     "page-text-index.js",
     "selection-block.js",
     "front-matter-extractor.js",
     "content-segments.js",
     "translation-service.js",
+    "reader-target-locator.js",
+    "overlay-layout.js",
+    "overlay-renderer.js",
+    "reader-overlay.js",
+    "provider-panel.js",
+    "translation-workflows.js",
+    "app-controller.js",
     "icons/paper-assistant-16.svg",
     "icons/paper-assistant-20.svg",
     "icons/translator-for-zotero-16.svg",

@@ -2,6 +2,15 @@
 
 本项目按语义化版本维护。正式安装包见 [GitHub Releases](https://github.com/Kumiko-kmk/Translator-for-Zotero/releases)。
 
+## 2.0.0 - 2026-08-23
+
+- 将原单文件 Bootstrap 实现拆分为生命周期、核心工具、目标定位、覆盖布局、覆盖渲染、侧栏、翻译工作流和应用控制器模块。
+- 翻译 Provider 扩展为 Qwen、DeepSeek、Gemini、Bing、Tencent Transmart 和 CNKI，并按 Provider 隔离密钥、模型与缓存。
+- 新增“未选择模型”状态；免密钥 Provider 可直接使用，需要密钥的 Provider 保留独立验证和安全存储。
+- 重建三列模型选择面板，使用随 XPI 打包的高清图标，并增加最近译文/原文预览与一键复制反馈。
+- 重建选区文字索引、跨页/单双栏段落识别、覆盖块定位和自适应排版，保留按页原文/译文切换和三页虚拟化。
+- 将仓库收缩为正式运行源码、固定构建工具和项目文档；新增架构交接文档并强化 XPI 文件清单验证。
+
 ## 1.2.0
 
 - 删除不稳定的整页正文提取、翻译按钮、页面任务状态和 `page-body` 请求链。
