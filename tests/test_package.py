@@ -8,7 +8,9 @@ PLUGIN = ROOT / "plugin"
 PACKAGED_FILES = {
     "manifest.json",
     "bootstrap.js",
-    "page-data-body-extractor.js",
+    "page-text-index.js",
+    "selection-block.js",
+    "front-matter-extractor.js",
     "content-segments.js",
     "translation-service.js",
     "icons/paper-assistant-16.svg",
@@ -69,6 +71,9 @@ def test_xpi_build_process_is_manifest_driven_and_validated() -> None:
 
 def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None:
     source = (PLUGIN / "bootstrap.js").read_text(encoding="utf-8")
+    index_source = (PLUGIN / "page-text-index.js").read_text(encoding="utf-8")
+    selection_source = (PLUGIN / "selection-block.js").read_text(encoding="utf-8")
+    segments_source = (PLUGIN / "content-segments.js").read_text(encoding="utf-8")
     translation_source = (PLUGIN / "translation-service.js").read_text(encoding="utf-8")
     assert '"renderTextSelectionPopup"' in source
     assert '"renderToolbar"' in source
@@ -111,28 +116,36 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "annotation?.text" in source
     assert "annotation?.position" in source
     assert "getSelectionPosition" in source
-    assert "getClientRect" in source
+    assert "view.getClientRect" not in source
+    assert "pageRectCache" not in source
     assert "reader-selection-replacer-test-layer" in source
     assert 'button.textContent = "翻译"' in source
     assert "DEFAULT_REPLACEMENT" not in source
     assert "replaceSelection" not in source
-    assert "SelectionMatcher" in source
-    assert "ReaderPageDataLoader" in source
-    assert "getPageData" in source
-    assert "sourceCharIDs" in source
-    assert "selectedCharIDs" in source
-    assert "selectedPosition" in source
-    assert "completeSelectionLines" in source
-    assert "translationText" in source
-    assert "translationPosition" in source
-    assert "translationIndentFirstBlock" in source
-    assert "paragraphCount" in source
-    assert 'matchType: full ? "full" : "partial"' in source
-    assert "lineCharCounts" in source
-    assert 'paragraph.matchType === "unclassified"' in source
-    assert '`${unclassified ? "U" : "P"}${displayIndex + 1}`' in source
-    assert "buildSelectionContext" in source
-    assert "selectionContext" in source
+    assert "SelectionMatcher" not in source
+    assert "ReaderPageDataLoader" not in source
+    assert "ReaderParagraphEngine" not in source
+    assert "ReaderSelectionBlock.create" in source
+    assert "getPageData" in index_source
+    assert 'coordinateSpace: "pdf"' in index_source
+    assert "normalizedViewportMatrix" in index_source
+    assert "function projectRect" in index_source
+    assert "convertToViewportPoint" in index_source
+    assert "convertToPdfPoint" in index_source
+    assert "function groupRects" in selection_source
+    assert "minimumGap" in selection_source
+    assert 'mode: "selection-block"' in selection_source
+    assert "geometricBreakRatios" in selection_source
+    assert "distribution: { pageWeights, blockWeights }" in selection_source
+    assert "selectionUnits" in segments_source
+    assert "selection-translation-v4-layout-structure" in translation_source
+    assert "allocateSelectionChunks" in source
+    assert "fitSelectionFlowBlock" in source
+    assert "paragraphCount" not in selection_source
+    assert "MAX_BOUNDARY_SCAN_PAGES" not in selection_source
+    assert "groupAdjacentSelectionTranslations" not in source
+    assert "mergeSelectionParts" not in source
+    assert "splitSelectionTranslation" not in source
     assert "ReaderMetadataLoader" in source
     assert 'readField("title")' in source
     assert 'readField("abstractNote")' in source
@@ -168,7 +181,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     assert "pageTranslationSessions" not in source
     assert "translatePage" not in source
     assert 'mode: "page-translation"' not in source
-    assert "ReaderPageDataBodyExtractor.extractPage" not in source
+    assert "ReaderPageDataBodyExtractor" not in source
     assert "ContentSegments.fromPageParagraphs" not in source
     assert "翻译整页" not in source
     assert "bindTranslationToggle" not in source
@@ -189,7 +202,7 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
 def test_current_page_translation_pipeline_is_removed() -> None:
     segments = (PLUGIN / "content-segments.js").read_text(encoding="utf-8")
     service = (PLUGIN / "translation-service.js").read_text(encoding="utf-8")
-    extractor = (PLUGIN / "page-data-body-extractor.js").read_text(encoding="utf-8")
+    extractor = (PLUGIN / "front-matter-extractor.js").read_text(encoding="utf-8")
     assert "fromPageParagraphs" not in segments
     assert 'kind: "page-body"' not in segments
     assert "PAGE_BODY_TRANSLATION_PROMPT_VERSION" not in service

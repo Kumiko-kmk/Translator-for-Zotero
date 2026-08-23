@@ -15,7 +15,8 @@ const ACTIVE_TRANSLATION_PROVIDER_PREF =
 // internal so users only need to provide the API key in the side pane.
 const QWEN_MT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const TRANSLATION_PROMPT_VERSION = "front-matter-translation-v2-title-break";
-const SELECTION_TRANSLATION_PROMPT_VERSION = "selection-translation-v1";
+const SELECTION_TRANSLATION_PROMPT_VERSION = "selection-translation-v4-layout-structure";
+const SELECTION_CACHE_ENVELOPE_VERSION = 1;
 const TITLE_BREAK_MARKER = "<br>";
 const TRANSLATION_CACHE_FILE = "paper-assistant-segment-translations.sqlite";
 const API_KEY_PROMPTED_PREF = "extensions.reader-selection-replacer.apiKeyPrompted";
@@ -83,10 +84,90 @@ function stableHash(value) {
 
 function positionSignature(position) {
   const fragments = position?.fragments?.length ? position.fragments : [position];
-  return stableHash(JSON.stringify((fragments || []).map(fragment => ({
-    pageIndex: Number(fragment?.pageIndex || 0),
-    rects: (fragment?.rects || []).map(rect => rect.map(value => Number(value).toFixed(3)))
-  }))));
+  return stableHash(JSON.stringify({
+    version: Number(position?.version || 1),
+    coordinateSpace: String(position?.coordinateSpace || "pdf"),
+    fragments: (fragments || []).map(fragment => ({
+      pageIndex: Number(fragment?.pageIndex || 0),
+      flowID: fragment?.flowID == null ? null : String(fragment.flowID),
+      lineIDs: [...(fragment?.lineIDs || [])].map(String),
+      lineCharCounts: [...(fragment?.lineCharCounts || [])].map(Number),
+      rects: (fragment?.rects || []).map(rect =>
+        rect.map(value => Number(value).toFixed(3)))
+    }))
+  }));
+}
+
+function isSelectionSegment(segment) {
+  return ["custom", "unclassified"].includes(segment?.kind);
+}
+
+function selectionUnits(segment) {
+  const units = (segment?.metadata?.selectionUnits || []).map((unit, index) => ({
+    id: String(unit?.id || `unit-${index}`),
+    sourceText: String(unit?.sourceText || "").trim(),
+    breakAfter: unit?.breakAfter === "paragraph" ? "paragraph" : "none"
+  })).filter(unit => unit.id && unit.sourceText);
+  return units.length ? units : [{ id: "unit-0",
+    sourceText: String(segment?.sourceText || "").trim(), breakAfter: "none" }];
+}
+
+function composeTranslatedUnits(units) {
+  return (units || []).reduce((text, unit, index) => {
+    const value = String(unit?.translatedText || "").trim();
+    if (!value) return text;
+    if (!text) return value;
+    const previous = units[index - 1];
+    return text + (previous?.breakAfter === "paragraph" ? "\n\n" : "") + value;
+  }, "");
+}
+
+function normalizeTranslationValue(segment, value) {
+  const rawUnits = Array.isArray(value?.translatedUnits) ? value.translatedUnits : [];
+  const translatedUnits = rawUnits.map((unit, index) => ({
+    id: String(unit?.id || `unit-${index}`),
+    translatedText: String(unit?.translatedText ?? unit?.text ?? "").trim(),
+    breakAfter: unit?.breakAfter === "paragraph" ? "paragraph" : "none"
+  })).filter(unit => unit.id && unit.translatedText);
+  let translatedText = typeof value === "string" ? value.trim()
+    : String(value?.translatedText || "").trim();
+  if (!translatedText && translatedUnits.length) {
+    translatedText = composeTranslatedUnits(translatedUnits);
+  }
+  if (isSelectionSegment(segment) && !translatedUnits.length && translatedText) {
+    const expected = selectionUnits(segment);
+    if (expected.length === 1) translatedUnits.push({ id: expected[0].id,
+      translatedText, breakAfter: "none" });
+  }
+  return { translatedText, translatedUnits };
+}
+
+function encodeCachedTranslation(segment, value) {
+  const normalized = normalizeTranslationValue(segment, value);
+  if (!isSelectionSegment(segment)) return normalized.translatedText;
+  return JSON.stringify({ type: "selection-translation", version: SELECTION_CACHE_ENVELOPE_VERSION,
+    translatedText: normalized.translatedText, translatedUnits: normalized.translatedUnits });
+}
+
+function decodeCachedTranslation(segment, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (!isSelectionSegment(segment)) return { translatedText: raw, translatedUnits: [] };
+  try {
+    const payload = JSON.parse(raw);
+    if (payload?.type !== "selection-translation"
+      || Number(payload?.version) !== SELECTION_CACHE_ENVELOPE_VERSION) return null;
+    const normalized = normalizeTranslationValue(segment, payload);
+    const expected = selectionUnits(segment);
+    if (normalized.translatedUnits.length !== expected.length
+      || normalized.translatedUnits.some((unit, index) => unit.id !== expected[index].id)) {
+      return null;
+    }
+    return normalized.translatedText ? normalized : null;
+  }
+  catch (_) {
+    return null;
+  }
 }
 
 var DeepSeekCredentials = {
@@ -239,12 +320,18 @@ var SegmentTranslationCache = {
 
   key(attachment, segment, targetLanguage,
     modelSpec = TranslationModelRegistry.deepseek) {
+    const sourceIdentity = isSelectionSegment(segment)
+      ? { sourceText: segment.sourceText, units: selectionUnits(segment).map(unit => ({
+        id: unit.id, sourceText: unit.sourceText, breakAfter: unit.breakAfter
+      })) }
+      : segment.sourceText;
     return {
       libraryID: Number(attachment?.libraryID || 0),
       attachmentKey: String(attachment?.key || attachment?.id || ""),
       segmentKind: segment.kind,
       positionSignature: positionSignature(segment.position),
-      sourceHash: stableHash(segment.sourceText),
+      sourceHash: stableHash(isSelectionSegment(segment)
+        ? JSON.stringify(sourceIdentity) : sourceIdentity),
       sourceLanguage: segment.sourceLanguage,
       targetLanguage,
       provider: modelSpec.provider,
@@ -302,11 +389,12 @@ var DeepSeekTranslationClient = {
     if (selection) {
       return [
         "将用户从英文学术 PDF 中划选的正文段落或文本忠实翻译为简体中文。",
-        "只返回 JSON：{\"translations\":[{\"id\":\"segment-id\",\"zh\":\"中文\"}]}。",
-        "每个输入 id 恰好返回一次；不得解释、总结、增删事实或使用 Markdown。",
+        "只返回 JSON：{\"translations\":[{\"id\":\"segment-id\",\"units\":[{\"id\":\"unit-0\",\"zh\":\"中文\"}]}]}。",
+        "每个 segment id 和 unit id 必须按输入顺序恰好返回一次；不得合并、拆分或遗漏单元。",
+        "不得解释、总结、增删事实或使用 Markdown。",
         "保持术语、数字、单位、缩写、变量、引用和原文语气准确。",
-        "自定义段落译文必须是纯文本，禁止 <br>、任何 HTML 标签和 Markdown。",
-        repair ? "上次输出未通过校验，请完整重译并严格遵循 JSON、纯文本和逐段对应规则。" : ""
+        "每个单元译文必须是纯文本，禁止 <br>、任何 HTML 标签、Markdown 和额外空行。",
+        repair ? "上次输出未通过校验，请完整重译并严格遵循 JSON、纯文本和逐单元对应规则。" : ""
       ].filter(Boolean).join("\n");
     }
     return [
@@ -364,11 +452,43 @@ var DeepSeekTranslationClient = {
     const result = new Map();
     for (const row of rows) {
       const id = String(row?.id || "");
-      let zh = String(row?.zh || "").trim();
-      if (!expected.has(id) || result.has(id) || !zh || !/[\u3400-\u9fff]/u.test(zh)) {
+      if (!expected.has(id) || result.has(id)) {
         throw Object.assign(new Error(`无效译文目标：${id || "unknown"}`), { code: "invalid-row" });
       }
       const segment = segments.find(value => value.id === id);
+      if (isSelectionSegment(segment)) {
+        const expectedUnits = selectionUnits(segment);
+        const rows = Array.isArray(row?.units) ? row.units : [];
+        if (rows.length !== expectedUnits.length) {
+          throw Object.assign(new Error(`译文单元数量不匹配：${id}`),
+            { code: "selection-unit-count" });
+        }
+        const translatedUnits = [];
+        for (let index = 0; index < expectedUnits.length; index++) {
+          const expectedUnit = expectedUnits[index];
+          const unitRow = rows[index];
+          const unitID = String(unitRow?.id || "");
+          const zh = String(unitRow?.zh || "").trim();
+          if (unitID !== expectedUnit.id || !zh || !/[\u3400-\u9fff]/u.test(zh)) {
+            throw Object.assign(new Error(`无效译文单元：${unitID || "unknown"}`),
+              { code: "invalid-selection-unit" });
+          }
+          if (/<\s*br\s*\/?>/iu.test(zh) || /<[^>]+>/u.test(zh) || /\n\s*\n/u.test(zh)) {
+            throw Object.assign(new Error("自定义段落译文包含不允许的换行或 HTML 标记"),
+              { code: "invalid-selection-html" });
+          }
+          translatedUnits.push({ id: expectedUnit.id,
+            translatedText: zh.replace(/\s*\n\s*/gu, " ").trim(),
+            breakAfter: expectedUnit.breakAfter });
+        }
+        result.set(id, { translatedUnits,
+          translatedText: composeTranslatedUnits(translatedUnits) });
+        continue;
+      }
+      let zh = String(row?.zh || "").trim();
+      if (!zh || !/[\u3400-\u9fff]/u.test(zh)) {
+        throw Object.assign(new Error(`无效译文目标：${id || "unknown"}`), { code: "invalid-row" });
+      }
       if (segment?.kind === "title") zh = this.normalizeTitleTranslation(zh);
       else if (/<\s*br\s*\/?>/iu.test(zh) || /<[^>]+>/u.test(zh)) {
         const selection = ["custom", "unclassified"].includes(segment?.kind);
@@ -391,7 +511,11 @@ var DeepSeekTranslationClient = {
       messages: [
         { role: "system", content: this.prompt(repair, segments) },
         { role: "user", content: JSON.stringify({
-          segments: segments.map(segment => ({ id: segment.id, kind: segment.kind, text: segment.sourceText }))
+          segments: segments.map(segment => isSelectionSegment(segment)
+            ? { id: segment.id, kind: segment.kind,
+              units: selectionUnits(segment).map(unit => ({ id: unit.id,
+                text: unit.sourceText })) }
+            : { id: segment.id, kind: segment.kind, text: segment.sourceText })
         }) }
       ]
     };
@@ -559,8 +683,21 @@ var QwenMTPlusTranslationClient = {
       throw Object.assign(new Error("Qwen-MT 每次请求只能翻译一个分段"),
         { code: "single-segment-only" });
     }
-    const text = await this.request(apiKey, segments, session, options);
-    return new Map([[segments[0].id, text]]);
+    const segment = segments[0];
+    if (!isSelectionSegment(segment)) {
+      const text = await this.request(apiKey, segments, session, options);
+      return new Map([[segment.id, text]]);
+    }
+    const translatedUnits = [];
+    for (const unit of selectionUnits(segment)) {
+      if (session?.cancelled) throw new Error("翻译已取消");
+      const text = await this.request(apiKey, [{ ...segment,
+        id: `${segment.id}:${unit.id}`, sourceText: unit.sourceText }], session, options);
+      translatedUnits.push({ id: unit.id, translatedText: text,
+        breakAfter: unit.breakAfter });
+    }
+    return new Map([[segment.id, { translatedUnits,
+      translatedText: composeTranslatedUnits(translatedUnits) }]]);
   }
 };
 
@@ -592,11 +729,12 @@ function getTranslationProvider(providerID = getActiveTranslationProviderID()) {
 
 var TranslationCoordinator = {
   result(segment, status, translatedText = "", error = null,
-    modelSpec = TranslationModelRegistry.deepseek) {
+    modelSpec = TranslationModelRegistry.deepseek, translatedUnits = []) {
     return {
       segmentID: segment.id,
       status,
       translatedText,
+      translatedUnits,
       provider: modelSpec.provider,
       model: modelSpec.model,
       promptVersion: SegmentTranslationCache.promptVersion(segment),
@@ -628,8 +766,11 @@ var TranslationCoordinator = {
       }
       const cached = bypassCache ? null
         : await SegmentTranslationCache.get(attachment, segment, targetLanguage, modelSpec);
-      if (cached?.translatedText) results.set(segment.id,
-        this.result(segment, "cached", cached.translatedText, null, modelSpec));
+      const decoded = cached?.translatedText
+        ? decodeCachedTranslation(segment, cached.translatedText) : null;
+      if (decoded?.translatedText) results.set(segment.id,
+        this.result(segment, "cached", decoded.translatedText, null, modelSpec,
+          decoded.translatedUnits));
       else eligible.push(segment);
     }
     if (!eligible.length) return { results, diagnostics: this.diagnostics(results) };
@@ -645,9 +786,14 @@ var TranslationCoordinator = {
       try {
         const translated = await translationClient.translate(
           apiKey, [segment], session, requestOptions);
-        const text = translated.get(segment.id);
-        await SegmentTranslationCache.put(attachment, segment, targetLanguage, text, modelSpec);
-        results.set(segment.id, this.result(segment, "translated", text, null, modelSpec));
+        const value = normalizeTranslationValue(segment, translated.get(segment.id));
+        if (!value.translatedText) {
+          throw Object.assign(new Error("翻译服务返回空译文"), { code: "empty-translation" });
+        }
+        await SegmentTranslationCache.put(attachment, segment, targetLanguage,
+          encodeCachedTranslation(segment, value), modelSpec);
+        results.set(segment.id, this.result(segment, "translated", value.translatedText,
+          null, modelSpec, value.translatedUnits));
       }
       catch (error) {
         results.set(segment.id, this.result(segment, "failed", "", error, modelSpec));

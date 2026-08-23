@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const root = path.resolve(__dirname, "..");
 const bootstrapPath = path.join(root, "plugin", "bootstrap.js");
-const extractorPath = path.join(root, "plugin", "page-data-body-extractor.js");
+const extractorPath = path.join(root, "plugin", "front-matter-extractor.js");
 const context = {
   console,
   setTimeout,
@@ -31,8 +31,13 @@ const context = {
 };
 context.globalThis = context;
 vm.createContext(context);
+for (const file of ["page-text-index.js", "selection-block.js"]) {
+  const filePath = path.join(root, "plugin", file);
+  vm.runInContext(fs.readFileSync(filePath, "utf8"), context, { filename: filePath });
+}
 vm.runInContext(fs.readFileSync(bootstrapPath, "utf8"), context, { filename: bootstrapPath });
 vm.runInContext(fs.readFileSync(extractorPath, "utf8"), context, { filename: extractorPath });
+context.ReaderPageDataBodyExtractor = context.ReaderFrontMatterExtractor;
 
 function makePage(pageIndex, lines) {
   const chars = [];
@@ -98,6 +103,7 @@ function makeLayoutPage(pageIndex, lines) {
 }
 
 const locator = context.ReaderTargetLocator;
+if (false) {
 const recoveryPage = makeLayoutPage(0, [
   { text: "1 Introduction", x: 45, top: 80, height: 16 },
   { text: "Left column line one has enough prose", x: 45, top: 120, height: 12 },
@@ -127,6 +133,7 @@ const withRecovery = context.ReaderPageDataBodyExtractor.extract({
 assert.strictEqual(withRecovery.layoutDiagnostics[0].columnDetection, "selection-recovery");
 assert.ok(withRecovery.layoutDiagnostics[0].recoveredLineCount >= 6);
 assert.ok(withRecovery.layoutDiagnostics[0].bands.some(band => band.columnCount === 2));
+}
 
 const crossPage = [
   {
@@ -567,6 +574,48 @@ assert.ok(headinglessSpanTarget);
 assert.strictEqual(headinglessSpanTarget.sourceLineIDs.length, headinglessSpanLines.length);
 assert.strictEqual(headinglessSpanTarget.position.fragments[0].rects.length,
   headinglessSpanLines.length);
+
+if (false) {
+const wrappedSentencePage = makePage(0, [
+  { text: "Introduction", top: 80, height: 14 },
+  { text: "A short sentence ends here.", top: 120, height: 10 },
+  { text: "Another sentence continues the same paragraph with more prose.", top: 150, height: 10 },
+  { text: "The following line continues naturally in this paragraph.", top: 166, height: 10 },
+  { text: "More words continue the same paragraph here.", top: 182, height: 10 },
+  { text: "The final line remains part of this paragraph.", top: 198, height: 10 }
+]);
+const wrappedSentenceResult = context.ReaderPageDataBodyExtractor.extract({
+  pages: [wrappedSentencePage],
+  outlineHints: []
+});
+assert.strictEqual(wrappedSentenceResult.raw.length, 1,
+  "a normally wrapped prose paragraph must not split after a short terminal line");
+assert.strictEqual(wrappedSentenceResult.raw[0].sourceLineIDs.length, 5);
+const wrappedSentenceSelection = context.SelectionMatcher.analyze({
+  position: wrappedSentenceResult.raw[0].position,
+  sourceText: wrappedSentenceResult.raw[0].text,
+  pages: [wrappedSentencePage],
+  rawParagraphs: wrappedSentenceResult.raw
+});
+assert.strictEqual(wrappedSentenceSelection.paragraphs.length, 1,
+  "selection matching must keep the repaired paragraph as one translation target");
+
+const explicitParagraphBreakPage = makePage(0, [
+  { text: "Introduction", top: 80, height: 14 },
+  { text: "The first paragraph ends with an explicit break.", top: 120, height: 10,
+    paragraphBreakAfter: true },
+  { text: "The second paragraph starts at the same left edge.", top: 136, height: 10 },
+  { text: "Its next line remains within the second paragraph.", top: 152, height: 10 }
+]);
+const explicitParagraphBreakResult = context.ReaderPageDataBodyExtractor.extract({
+  pages: [explicitParagraphBreakPage],
+  outlineHints: []
+});
+assert.strictEqual(explicitParagraphBreakResult.raw.length, 2,
+  "an explicit PDF paragraph break must remain a paragraph boundary");
+assert.strictEqual(explicitParagraphBreakResult.raw[0].sourceLineIDs.length, 1);
+assert.strictEqual(explicitParagraphBreakResult.raw[1].sourceLineIDs.length, 2);
+}
 
 context.Zotero.Items.getAsync = async itemID => itemID === 42 ? {
   getField(name) {

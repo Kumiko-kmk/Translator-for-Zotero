@@ -37,7 +37,9 @@ if ($bootstrap -notmatch $versionDeclaration) {
 $packageFiles = @(
     "manifest.json",
     "bootstrap.js",
-    "page-data-body-extractor.js",
+    "page-text-index.js",
+    "selection-block.js",
+    "front-matter-extractor.js",
     "content-segments.js",
     "translation-service.js",
     "icons/paper-assistant-16.svg",
