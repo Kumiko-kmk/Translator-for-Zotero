@@ -63,23 +63,24 @@ const segments = context.ContentSegments.fromTargets([
 ]);
 assert.strictEqual(segments[0].sourceLanguage, "en");
 assert.strictEqual(segments[1].sourceLanguage, "zh-CN");
-const selectionSegments = context.ContentSegments.fromSelection({ paragraphs: [{
-  sourceText: "Full paragraph prose", selectedText: "Selected custom prose", selectedCharIDs: ["c3"],
-  selectedPosition: position, matchType: "partial", confidence: "high",
-      translationContinuesParagraph: true,
-      translationSourceStart: 0,
-      translationSourceEnd: 20
-}, {
-  sourceText: "Unclassified low confidence prose", selectedText: "Unclassified low confidence prose",
-  selectedCharIDs: ["c4"], selectedPosition: position, matchType: "unclassified", confidence: "low"
-}] });
+const selectionSegments = context.ContentSegments.fromSelectionBlock({
+  mode: "selection-block",
+  sourceText: "Selected custom prose.\n\nSecond source unit.",
+  position,
+  blocks: [{ pageIndex: 0, column: "single", rects: position.rects }],
+  units: [
+    { id: "unit-0", sourceText: "Selected custom prose.", breakAfter: "paragraph" },
+    { id: "unit-1", sourceText: "Second source unit.", breakAfter: "none" }
+  ],
+  distribution: { pageWeights: [{ pageIndex: 0, weight: 1 }],
+    blockWeights: [{ id: "page-0-single-0", pageIndex: 0, weight: 1 }] }
+});
 assert.strictEqual(selectionSegments[0].kind, "custom");
-assert.strictEqual(selectionSegments[0].sourceText, "Selected custom prose");
-assert.strictEqual(selectionSegments[0].metadata.translationContinuesParagraph, true);
-assert.strictEqual(selectionSegments[0].metadata.translationSourceStart, 0);
-assert.strictEqual(selectionSegments[0].metadata.translationSourceEnd, 20);
-assert.strictEqual(selectionSegments[1].kind, "unclassified");
-assert.strictEqual(selectionSegments[1].sourceLanguage, "en");
+assert.strictEqual(selectionSegments[0].sourceText,
+  "Selected custom prose.\n\nSecond source unit.");
+assert.strictEqual(selectionSegments[0].id, "selection-block");
+assert.strictEqual(selectionSegments[0].metadata.selectionMode, "selection-block");
+assert.strictEqual(selectionSegments[0].metadata.selectionUnits.length, 2);
 const parsed = context.DeepSeekTranslationClient.parse(
   '```json\n{"translations":[{"id":"title","zh":"可靠的科学标题"}]}\n```');
 const validated = context.DeepSeekTranslationClient.validate([segments[0]], parsed);
@@ -104,13 +105,33 @@ assert.throws(() => context.DeepSeekTranslationClient.validate([
 ], { translations: [{ id: "abstract", zh: "摘要正文<br>不得换行" }] }), /摘要译文/u);
 assert.throws(() => context.DeepSeekTranslationClient.validate([segments[0]],
   { translations: [{ id: "unexpected", zh: "错误" }] }));
-assert.strictEqual(context.DeepSeekTranslationClient.validate([selectionSegments[0]], {
-  translations: [{ id: "p-0", zh: "选中的自定义段落" }]
-}).get("p-0"), "选中的自定义段落");
+const structuredSelection = context.DeepSeekTranslationClient.validate([selectionSegments[0]], {
+  translations: [{ id: "selection-block", units: [
+    { id: "unit-0", zh: "选中的自定义段落" },
+    { id: "unit-1", zh: "第二个翻译单元" }
+  ] }]
+}).get("selection-block");
+assert.strictEqual(structuredSelection.translatedText,
+  "选中的自定义段落\n\n第二个翻译单元");
+assert.deepStrictEqual(Array.from(structuredSelection.translatedUnits, unit => unit.id),
+  ["unit-0", "unit-1"]);
 assert.throws(() => context.DeepSeekTranslationClient.validate([selectionSegments[0]], {
-  translations: [{ id: "p-0", zh: "自定义段落<br>不允许换行" }]
+  translations: [{ id: "selection-block", units: [
+    { id: "unit-0", zh: "自定义段落<br>不允许换行" },
+    { id: "unit-1", zh: "第二单元" }
+  ] }]
 }), /自定义段落译文/u);
-assert.match(context.DeepSeekTranslationClient.prompt(false, selectionSegments), /自定义段落译文/u);
+assert.throws(() => context.DeepSeekTranslationClient.validate([selectionSegments[0]], {
+  translations: [{ id: "selection-block", units: [
+    { id: "unit-1", zh: "顺序错误" }, { id: "unit-0", zh: "顺序错误" }
+  ] }]
+}), /无效译文单元/u);
+assert.match(context.DeepSeekTranslationClient.prompt(false, selectionSegments), /unit id/u);
+const cacheEnvelope = context.encodeCachedTranslation(selectionSegments[0], structuredSelection);
+const decodedEnvelope = context.decodeCachedTranslation(selectionSegments[0], cacheEnvelope);
+assert.strictEqual(decodedEnvelope.translatedText,
+  "选中的自定义段落\n\n第二个翻译单元");
+assert.strictEqual(decodedEnvelope.translatedUnits.length, 2);
 const qwenModel = context.TranslationModelRegistry.qwenMTPlus;
 assert.strictEqual(JSON.stringify(qwenModel), JSON.stringify({
   provider: "qwen-mt",
@@ -145,6 +166,16 @@ assert.strictEqual(deepSeekCacheKey.provider, "deepseek");
 assert.strictEqual(qwenCacheKey.provider, "qwen-mt");
 assert.strictEqual(qwenCacheKey.model, "qwen-mt-plus");
 assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
+const structuredCacheKey = context.SegmentTranslationCache.key(
+  { libraryID: 1, key: "ATT" }, selectionSegments[0], "zh-CN");
+const changedStructureCacheKey = context.SegmentTranslationCache.key(
+  { libraryID: 1, key: "ATT" }, { ...selectionSegments[0], metadata: {
+    ...selectionSegments[0].metadata,
+    selectionUnits: [{ id: "unit-0", sourceText: selectionSegments[0].sourceText,
+      breakAfter: "none" }]
+  } }, "zh-CN");
+assert.notStrictEqual(structuredCacheKey.sourceHash, changedStructureCacheKey.sourceHash,
+  "selection cache identity must change when hard-break units change");
 (async () => {
   const originalGet = context.SegmentTranslationCache.get;
   const originalPut = context.SegmentTranslationCache.put;
@@ -216,21 +247,27 @@ assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
   assert.strictEqual(result.results.get("abstract").status, "translated");
   assert.strictEqual(calls, 1);
 
-  context.SegmentTranslationCache.get = async (_attachment, segment) => null;
+  context.SegmentTranslationCache.get = async () => null;
+  let cachedSelectionEnvelope = "";
+  context.SegmentTranslationCache.put = async (_attachment, segment, _target, value) => {
+    if (segment.id === "selection-block") cachedSelectionEnvelope = value;
+  };
   context.DeepSeekTranslationClient.translate = async (_key, batch) => {
     calls++;
-    return new Map(batch.map(segment => [segment.id, `译文-${segment.id}`]));
+    return new Map(batch.map(segment => [segment.id, segment.id === "selection-block"
+      ? structuredSelection : `译文-${segment.id}`]));
   };
   const selectionResult = await context.TranslationCoordinator.translateSegments({
     attachment: { libraryID: 1, key: "ATT" },
     segments: selectionSegments
   });
-  assert.strictEqual(selectionResult.results.get("p-0").status, "translated");
-  assert.strictEqual(selectionResult.results.get("u-1").status, "translated");
-  assert.strictEqual(selectionResult.diagnostics.translated, 2);
-  assert.strictEqual(calls, 3);
+  assert.strictEqual(selectionResult.results.get("selection-block").status, "translated");
+  assert.strictEqual(selectionResult.results.get("selection-block").translatedUnits.length, 2);
+  assert.strictEqual(selectionResult.diagnostics.translated, 1);
+  assert.strictEqual(calls, 2);
+  assert.strictEqual(JSON.parse(cachedSelectionEnvelope).version, 1);
   assert.strictEqual(context.SegmentTranslationCache.promptVersion(selectionSegments[0]),
-    "selection-translation-v1");
+    "selection-translation-v4-layout-structure");
 
   let qwenRequest = null;
   context.Zotero.HTTP.request = async (method, endpoint, options) => {
@@ -253,6 +290,23 @@ assert.notStrictEqual(deepSeekCacheKey.model, qwenCacheKey.model);
     messages: [{ role: "user", content: "A Qwen title" }],
     translation_options: { source_lang: "English", target_lang: "Chinese" }
   });
+
+  const qwenUnitRequests = [];
+  context.Zotero.HTTP.request = async (_method, _endpoint, options) => {
+    const body = JSON.parse(options.body);
+    qwenUnitRequests.push(body.messages[0].content);
+    return { status: 200, response: { choices: [{ message: {
+      content: body.messages[0].content.startsWith("Selected")
+        ? "千问第一单元" : "千问第二单元"
+    } }] } };
+  };
+  const qwenSelection = await context.QwenMTPlusTranslationClient.translate(
+    "qwen-secret", selectionSegments, {}, { targetLanguage: "zh-CN" });
+  assert.deepStrictEqual(qwenUnitRequests,
+    ["Selected custom prose.", "Second source unit."]);
+  assert.strictEqual(qwenSelection.get("selection-block").translatedText,
+    "千问第一单元\n\n千问第二单元");
+  assert.strictEqual(qwenSelection.get("selection-block").translatedUnits.length, 2);
 
   let qwenFailureCalls = 0;
   context.Zotero.HTTP.request = async () => {

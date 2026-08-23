@@ -33,38 +33,37 @@ var ContentSegments = {
     })).filter(segment => segment.sourceText && segment.position);
   },
 
-  fromSelection(match) {
-    return (match?.paragraphs || []).map((paragraph, index) => {
-      const sourceText = String(paragraph.translationText
-        || paragraph.selectedText || paragraph.sourceText || "").trim();
-      const position = paragraph.translationPosition || paragraph.selectedPosition;
-      return {
-        id: `${paragraph.matchType === "unclassified" ? "u" : "p"}-${index}`,
-        kind: paragraph.matchType === "unclassified" ? "unclassified" : "custom",
-        sourceText,
-        sourceLanguage: this.detectLanguage(sourceText),
-        sourceCharIDs: [...(paragraph.translationCharIDs || paragraph.selectedCharIDs || [])]
-          .map(String),
-        sourceLineIDs: [...(paragraph.translationLineIDs || [])].map(String),
-        position,
-        pageIndexes: (position?.fragments || [])
-          .map(fragment => Number(fragment.pageIndex || 0)),
-        confidence: paragraph.confidence || "low",
-        metadata: {
-          matchMethod: null,
-          metadataCoverage: null,
-          completeness: null,
-          sourceIndex: paragraph.sourceIndex ?? null,
-          matchType: paragraph.matchType || null,
-          selectionParagraphIndex: index,
-          selectedText: String(paragraph.selectedText || ""),
-          selectedPosition: paragraph.selectedPosition || null,
-          translationIndentFirstBlock: Boolean(paragraph.translationIndentFirstBlock),
-          translationContinuesParagraph: Boolean(paragraph.translationContinuesParagraph),
-          translationSourceStart: paragraph.translationSourceStart ?? null,
-          translationSourceEnd: paragraph.translationSourceEnd ?? null
-        }
-      };
-    }).filter(segment => segment.position && segment.sourceText);
+  fromSelectionBlock(match) {
+    const sourceText = String(match?.sourceText || "").trim();
+    const position = match?.position || null;
+    if (!sourceText || !position) return [];
+    return [{
+      id: "selection-block",
+      kind: "custom",
+      sourceText,
+      sourceLanguage: this.detectLanguage(sourceText),
+      sourceCharIDs: [],
+      sourceLineIDs: [],
+      position,
+      pageIndexes: [...new Set((position.fragments || [])
+        .map(fragment => Number(fragment.pageIndex || 0)))],
+      confidence: "high",
+      metadata: {
+        matchMethod: "original-selection",
+        metadataCoverage: null,
+        completeness: "exact",
+        sourceIndex: null,
+        selectionMode: "selection-block",
+        blockCount: Number(match?.blocks?.length || 0),
+        selectionUnits: (match?.units || []).map(unit => ({
+          id: String(unit.id || ""),
+          sourceText: String(unit.sourceText || "").trim(),
+          breakAfter: unit.breakAfter === "paragraph" ? "paragraph" : "none"
+        })).filter(unit => unit.id && unit.sourceText),
+        selectionDistribution: match?.distribution || { pageWeights: [], blockWeights: [] },
+        selectedText: sourceText,
+        selectedPosition: position
+      }
+    }];
   }
 };

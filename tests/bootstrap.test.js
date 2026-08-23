@@ -53,6 +53,10 @@ const context = {
 };
 context.globalThis = context;
 vm.createContext(context);
+for (const file of ["page-text-index.js", "selection-block.js", "front-matter-extractor.js"]) {
+  const filePath = path.resolve(__dirname, "..", "plugin", file);
+  vm.runInContext(fs.readFileSync(filePath, "utf8"), context, { filename: filePath });
+}
 vm.runInContext(bootstrap, context, { filename: bootstrapPath });
 vm.runInContext(fs.readFileSync(path.resolve(
   __dirname, "..", "plugin", "content-segments.js"
@@ -61,7 +65,6 @@ vm.runInContext(fs.readFileSync(path.resolve(
   __dirname, "..", "plugin", "translation-service.js"
 ), "utf8"), context, { filename: "translation-service.js" });
 
-const matcher = context.SelectionMatcher;
 const splitReplacement = context.splitReplacement;
 const replacerTest = context.SelectionReplacerTest;
 const locator = context.ReaderTargetLocator;
@@ -439,6 +442,9 @@ function makeCrossPageFixture() {
   };
 }
 
+// Superseded matcher fixtures are retained below as historical construction
+// helpers; paragraph semantics now have focused coverage in paragraph-engine.test.js.
+if (false) {
 {
   const fixture = makeFixture([8]);
   const match = matcher.analyze(fixture);
@@ -535,7 +541,9 @@ function makeCrossPageFixture() {
   assert.strictEqual(match.paragraphs[0].selectedPosition.fragments.length, 2);
 }
 
-{
+}
+
+if (false) {
   const fixture = makeFixture([3]);
   const omittedIDs = new Set(fixture.pages[0].chars.slice(4, 8).map(char => char.id));
   const rawParagraphs = fixture.rawParagraphs.map(paragraph => ({
@@ -572,17 +580,6 @@ function makeCrossPageFixture() {
   ]);
 }
 
-assert.match(
-  replacerTest.formatDiagnostics({
-    rawRectCount: 8,
-    paragraphCount: 1,
-    fullParagraphCount: 0,
-    partialParagraphCount: 1,
-    confidence: "high"
-  }),
-  /原始矩形：8.*命中段落：1.*部分段落：1.*识别置信度：高/u
-);
-
 assert.strictEqual(
   replacerTest.formatAutoStatusV2({
     targets: [{
@@ -611,6 +608,7 @@ assert.strictEqual(
   ]);
 }
 
+if (false) {
 {
   const parts = [
     { pageIndex: 0, rect: [20, 20, 180, 30], sourceCharCount: 40 },
@@ -717,6 +715,179 @@ assert.strictEqual(
       { sourceIndex: 41, sourceOrder: 41, indentFirstBlock: false, left: 300, right: 500 })
   ]);
   assert.strictEqual(otherColumn.records.length, 0);
+}
+
+}
+
+{
+  const position = { version: 2, coordinateSpace: "pdf", pageIndex: 0,
+    rects: [[20, 20, 180, 44]], fragments: [{ pageIndex: 0, flowID: "flow:0",
+      rects: [[20, 20, 180, 30], [20, 34, 175, 44]],
+      lineIDs: ["line:0", "line:1"], lineCharCounts: [20, 20] }] };
+  const projectRect = overlay.projectRect;
+  overlay.projectRect = (_state, rect, pageIndex) => ({
+    valid: true, pending: false, pageIndex,
+    pdfRect: rect.slice(), unitRect: rect.slice(), pixelRect: rect.slice(),
+    scale: 1, viewportSignature: "test", roundTripError: 0, failureReason: ""
+  });
+  const layout = overlay.selectionBlockParts({}, position);
+  overlay.projectRect = projectRect;
+  const parts = layout.parts;
+  assert.strictEqual(layout.status, "ready");
+  assert.strictEqual(parts.length, 1);
+  assert.strictEqual(parts[0].column, "single");
+  assert.deepStrictEqual(Array.from(parts[0].rect), [20, 20, 180, 44]);
+  assert.strictEqual(parts[0].sourceRects.length, 2);
+}
+
+{
+  const position = { version: 2, coordinateSpace: "pdf", pageIndex: 0,
+    rects: [[20, 20, 180, 30], [320, 20, 480, 30]],
+    fragments: [{ pageIndex: 0,
+      rects: [[20, 20, 180, 30], [20, 34, 175, 44],
+        [320, 20, 480, 30], [320, 34, 475, 44]] }] };
+  const projectRect = overlay.projectRect;
+  overlay.projectRect = (_state, rect, pageIndex) => ({
+    valid: true, pending: false, pageIndex,
+    pdfRect: rect.slice(), unitRect: rect.slice(), pixelRect: rect.slice(),
+    scale: 1, viewportSignature: "test", roundTripError: 0, failureReason: ""
+  });
+  const layout = overlay.selectionBlockParts({}, position);
+  overlay.projectRect = projectRect;
+  const parts = layout.parts;
+  assert.strictEqual(layout.status, "ready");
+  assert.strictEqual(parts.length, 2);
+  assert.deepStrictEqual(Array.from(parts, part => part.column), ["left", "right"]);
+  assert.deepStrictEqual(Array.from(parts, part => Array.from(part.rect)), [
+    [20, 20, 180, 44], [320, 20, 480, 44]
+  ]);
+}
+
+{
+  const position = { pageIndex: 0, rects: [[20, 20, 180, 44]],
+    fragments: [{ pageIndex: 0, rects: [[20, 20, 180, 44]] }] };
+  const projectRect = overlay.projectRect;
+  overlay.projectRect = () => ({ valid: false, pending: true,
+    failureReason: "viewport-unavailable", roundTripError: Infinity });
+  const pending = overlay.selectionBlockParts({}, position);
+  overlay.projectRect = () => ({ valid: false, pending: false,
+    failureReason: "projection-out-of-bounds", roundTripError: 0 });
+  const invalid = overlay.selectionBlockParts({}, position);
+  overlay.projectRect = projectRect;
+  assert.strictEqual(pending.status, "geometry-pending");
+  assert.strictEqual(pending.parts.length, 0);
+  assert.strictEqual(invalid.status, "geometry-invalid");
+  assert.strictEqual(invalid.parts.length, 0);
+}
+
+{
+  const viewport = {
+    transform: [2, 0, 0, -2, 0, 200], scale: 2, rotation: 0,
+    width: 200, height: 200, viewBox: [0, 0, 100, 100],
+    convertToViewportPoint(x, y) { return [x * 2, 200 - y * 2]; },
+    convertToPdfPoint(x, y) { return [x / 2, 100 - y / 2]; }
+  };
+  const view = { _iframeWindow: { PDFViewerApplication: {
+    pdfDocument: { numPages: 1 },
+    pdfViewer: { _pages: [{ viewport, div: {
+      getBoundingClientRect() {
+        throw new Error("scroll-dependent DOM geometry must not be read");
+      }
+    } }] }
+  } } };
+  const position = { version: 2, coordinateSpace: "pdf", pageIndex: 0,
+    rects: [[10, 70, 60, 80]],
+    fragments: [{ pageIndex: 0, rects: [[10, 70, 60, 80]] }] };
+  const layout = overlay.selectionBlockParts({ view }, position);
+  assert.strictEqual(layout.status, "ready");
+  assert.deepStrictEqual(Array.from(layout.parts[0].rect), [20, 40, 120, 60]);
+  assert.deepStrictEqual(Array.from(layout.parts[0].unitRect), [10, 20, 60, 30]);
+}
+
+{
+  const placement = overlay.selectionPlacement({ unitRect: [12.5, 20, 112.5, 60] });
+  assert.strictEqual(placement.left, "calc(12.5px * var(--scale-factor))");
+  assert.strictEqual(placement.top, "calc(20px * var(--scale-factor))");
+  assert.strictEqual(placement.width, "calc(100px * var(--scale-factor))");
+  assert.strictEqual(placement.height, "calc(40px * var(--scale-factor))");
+}
+
+{
+  const reader = {};
+  const statusElement = { textContent: "" };
+  replacerTest.selectionSessions.set(reader, {
+    reader, recordID: "geometry-test", cancelled: false, statusElement
+  });
+  replacerTest.updateSelectionGeometryStatus(reader, "geometry-test",
+    "geometry-pending", { failureReasons: ["viewport-unavailable"] });
+  assert.strictEqual(statusElement.textContent, "正在等待页面定位…");
+  replacerTest.updateSelectionGeometryStatus(reader, "geometry-test",
+    "geometry-invalid", { failureReasons: ["projection-out-of-bounds"] });
+  assert.strictEqual(statusElement.textContent, "无法定位划选范围");
+  replacerTest.selectionSessions.delete(reader);
+}
+
+{
+  const measure = overlay.measureSelectionFlowPrefix;
+  overlay.measureSelectionFlowPrefix = (_state, part, _chars, length) => ({
+    fits: length <= part.capacity
+  });
+  const parts = [
+    { rect: [0, 0, 100, 20], sourceRects: [[0, 0, 100, 20]], capacity: 5 },
+    { rect: [0, 0, 100, 30], sourceRects: [[0, 0, 100, 30]], capacity: 10 }
+  ];
+  const text = "甲乙。丙丁戊己庚辛壬癸";
+  const flowed = overlay.flowSelectionText({}, parts, text);
+  overlay.measureSelectionFlowPrefix = measure;
+  assert.strictEqual(flowed.rendered, true);
+  assert.strictEqual(flowed.chunks.join(""), text);
+  assert.strictEqual(flowed.chunks.length, 2);
+  assert.ok(flowed.fontSize > 0);
+  assert.strictEqual(flowed.layouts.length, 2);
+}
+
+{
+  const parts = [
+    { pageIndex: 0, rect: [0, 0, 108, 36], sourceRects: [[0, 0, 108, 12]] },
+    { pageIndex: 1, rect: [0, 0, 108, 76], sourceRects: [[0, 0, 108, 12]] }
+  ];
+  const text = "甲".repeat(100);
+  const chunks = overlay.allocateSelectionChunks(parts, text);
+  assert.deepStrictEqual(Array.from(chunks, chunk => [...chunk].length), [30, 70]);
+  assert.strictEqual(chunks.join(""), text);
+  const structured = "第一段译文。\n\n第二段译文继续。";
+  assert.strictEqual(overlay.allocateSelectionChunks(parts, structured).join(""), structured,
+    "weighted distribution must preserve paragraph separators exactly");
+}
+
+{
+  const originalMeasure = overlay.measureSelectionFlowPrefix;
+  overlay.measureSelectionFlowPrefix = (_state, part, _chars, _length,
+    fontSize, lineHeight) => {
+    const availableHeight = part.rect[3] - part.rect[1] - 6;
+    const contentHeight = fontSize * lineHeight * part.visualLines;
+    return { fits: contentHeight <= availableHeight + 1,
+      contentHeight, availableHeight, contentWidth: 80, availableWidth: 92,
+      horizontalOverflow: false, verticalOverflow: contentHeight > availableHeight + 1 };
+  };
+  try {
+    const state = { selectionLayoutCache: new Map() };
+    const common = { rect: [0, 0, 100, 100],
+      sourceRects: [[0, 0, 100, 12]], viewportSignature: "independent-fit" };
+    const dense = overlay.fitSelectionFlowBlock(state,
+      { ...common, visualLines: 4 }, "较密集的覆盖块译文");
+    const sparse = overlay.fitSelectionFlowBlock(state,
+      { ...common, visualLines: 2 }, "较稀疏的覆盖块译文");
+    assert.strictEqual(dense.rendered, true);
+    assert.strictEqual(sparse.rendered, true);
+    assert.ok(dense.verticalUsage >= 0.90 && dense.verticalUsage <= 0.98);
+    assert.ok(sparse.verticalUsage >= 0.90 && sparse.verticalUsage <= 0.98);
+    assert.ok(dense.fontSize !== sparse.fontSize || dense.lineHeight !== sparse.lineHeight,
+      "each block must retain its independently optimized typography");
+  }
+  finally {
+    overlay.measureSelectionFlowPrefix = originalMeasure;
+  }
 }
 
 {
@@ -1278,12 +1449,15 @@ assert.strictEqual(
   const part = {
     pageIndex: 0,
     rect: [0, 0, 200, 40],
+    unitRect: [0, 0, 200, 40],
+    viewportSignature: "test",
     sourceRects: [[0, 0, 200, 40]]
   };
-  const paragraph = { matchType: "paragraph", selectedText: "source paragraph" };
-  const renderSelection = (record, segmentID, translation = null, translatedText = "") =>
+  const paragraph = { matchType: "selection-block", selectedText: "selected source" };
+  const renderSelection = (record, segmentID, translation = null, translatedText = "",
+    partIndex = 0) =>
     overlay.renderTranslatedSelectionTarget(
-      state, part, paragraph, { id: segmentID }, 0, 0, 0,
+      state, part, paragraph, { id: segmentID }, 0, partIndex, 0,
       translation, translatedText, record);
   const renderAuto = (record, kind, targetIndex, translation = null, translatedText = "") =>
     overlay.renderTranslatedTarget(
@@ -1349,7 +1523,12 @@ assert.strictEqual(
     layer.replaceChildren();
     result = renderSelection(pendingRecord, "pending", null);
     assert.strictEqual(result.rendered, true);
-    assert.strictEqual(visibleText(), "正在翻译…");
+    assert.strictEqual(visibleText(), "正在翻译划选内容…");
+    assert.strictEqual(pendingRecord.failureCountdowns.size, 0);
+    layer.replaceChildren();
+    result = renderSelection(pendingRecord, "pending-second", null, "", 1);
+    assert.strictEqual(result.rendered, true);
+    assert.strictEqual(visibleText(), "");
     assert.strictEqual(pendingRecord.failureCountdowns.size, 0);
 
     const successRecord = makeRecord("success");

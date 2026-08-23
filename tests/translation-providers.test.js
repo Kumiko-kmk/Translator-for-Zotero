@@ -92,6 +92,20 @@ const segment = {
   confidence: "high",
   position: { pageIndex: 0, rects: [[0, 0, 100, 20]] }
 };
+const selectionSegment = {
+  ...segment,
+  id: "selection-block",
+  kind: "custom",
+  sourceText: "First selected paragraph.\n\nSecond selected paragraph.",
+  metadata: {
+    selectionUnits: [
+      { id: "unit-0", sourceText: "First selected paragraph.",
+        breakAfter: "paragraph" },
+      { id: "unit-1", sourceText: "Second selected paragraph.",
+        breakAfter: "none" }
+    ]
+  }
+};
 assert.notStrictEqual(context.GeminiCredentials.realm, context.DeepSeekCredentials.realm);
 
 (async () => {
@@ -175,6 +189,38 @@ assert.notStrictEqual(context.GeminiCredentials.realm, context.DeepSeekCredentia
   assert.ok(cnkiPayload.words);
   assert.strictEqual(cnkiPayload.translateType, null);
   assert.strictEqual(cnkiRequest.options.headers.Token, "cnki-token");
+
+  const structuredProviders = [
+    ["Gemini", context.GeminiTranslationClient, "gemini-secret", "Gemini译文"],
+    ["Bing", context.BingTranslationClient, "", "Bing译文"],
+    ["Transmart", context.TransmartTranslationClient, "", "Transmart译文"],
+    ["CNKI", context.CNKITranslationClient, "", "CNKI译文"]
+  ];
+  for (const [label, client, apiKey, unitText] of structuredProviders) {
+    const translated = await client.translate(apiKey, [selectionSegment],
+      { cancelled: false }, { retryDelays: [] });
+    const value = translated.get(selectionSegment.id);
+    assert.strictEqual(value.translatedText, `${unitText}\n\n${unitText}`,
+      `${label} should preserve the hard paragraph break`);
+    assert.strictEqual(JSON.stringify(Array.from(value.translatedUnits, unit => unit.id)),
+      JSON.stringify(["unit-0", "unit-1"]),
+      `${label} should preserve selection unit order and IDs`);
+  }
+
+  const providerHTTP = context.Zotero.HTTP.request;
+  let failedUnitCalls = 0;
+  context.Zotero.HTTP.request = async (...args) => {
+    failedUnitCalls++;
+    if (failedUnitCalls === 2) throw new Error("second unit failed");
+    return providerHTTP(...args);
+  };
+  await assert.rejects(
+    context.GeminiTranslationClient.translate("gemini-secret", [selectionSegment],
+      { cancelled: false }, { retryDelays: [] }),
+    /second unit failed/u,
+    "a failed unit must fail the whole selection instead of returning partial text"
+  );
+  context.Zotero.HTTP.request = providerHTTP;
 
   const originalGet = context.SegmentTranslationCache.get;
   const originalPut = context.SegmentTranslationCache.put;
