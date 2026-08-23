@@ -35,14 +35,19 @@ jobs:
         shell: pwsh
         run: |
           node --check plugin/bootstrap.js
+          node --check plugin/page-text-index.js
+          node --check plugin/selection-block.js
+          node --check plugin/front-matter-extractor.js
           node --check plugin/content-segments.js
-          node --check plugin/page-data-body-extractor.js
           node --check plugin/translation-service.js
 
       - name: Run Node tests
         shell: pwsh
         run: |
+          node tests/page-text-index.test.js
+          node tests/selection-block.test.js
           node tests/translation.test.js
+          node tests/translation-providers.test.js
           node tests/bootstrap.test.js
           node tests/front-matter.test.js
 

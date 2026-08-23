@@ -79,6 +79,22 @@ def test_xpi_build_process_is_manifest_driven_and_validated() -> None:
     assert "Get-FileHash" in source
 
 
+def test_ci_tracks_the_active_selection_pipeline() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    for path in (
+        "plugin/page-text-index.js",
+        "plugin/selection-block.js",
+        "plugin/front-matter-extractor.js",
+        "tests/page-text-index.test.js",
+        "tests/selection-block.test.js",
+        "tests/translation-providers.test.js",
+    ):
+        assert path in workflow
+    assert "plugin/page-data-body-extractor.js" not in workflow
+
+
 def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None:
     source = (PLUGIN / "bootstrap.js").read_text(encoding="utf-8")
     index_source = (PLUGIN / "page-text-index.js").read_text(encoding="utf-8")
