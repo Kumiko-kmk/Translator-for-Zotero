@@ -12,6 +12,7 @@ const bootstrapPath = path.resolve(
   "bootstrap.js"
 );
 const bootstrap = fs.readFileSync(bootstrapPath, "utf8");
+const clipboardWrites = [];
 const context = {
   console,
   setTimeout,
@@ -29,7 +30,14 @@ const context = {
       cloneInto(value) { return value; },
       exportFunction(value) { return value; }
     },
-    interfaces: {}
+    classes: {
+      "@mozilla.org/widget/clipboardhelper;1": {
+        getService() {
+          return { copyString(value) { clipboardWrites.push(String(value)); } };
+        }
+      }
+    },
+    interfaces: { nsIClipboardHelper: {} }
   },
   Services: {
     scriptloader: { loadSubScript() {} },
@@ -129,26 +137,39 @@ const overlay = context.SelectionReplacerOverlay;
   const panel = [...replacerTest.panelStates][0];
   assert.ok(panel);
   assert.strictEqual(panel.providerButtons.children.length, 6);
-  assert.strictEqual(panel.providerHeaderLabel.textContent, "未选择模型");
+  assert.strictEqual(panel.providerHeaderLabel.textContent, "选择翻译模型");
   assert.strictEqual(panel.providerHeaderLogo.children.length, 0);
+  assert.strictEqual(panel.providerHeader.style.minHeight, "48px");
+  assert.strictEqual(panel.container.style.marginTop, "12px");
   assert.strictEqual(panel.inputSection.style.display, "none");
   assert.strictEqual(panel.actions.style.display, "none");
   assert.strictEqual(panel.divider.style.display, "none");
+  assert.strictEqual(panel.container.children.length, 2);
+  assert.strictEqual(panel.container.children[1], panel.previewSection);
+  assert.strictEqual(panel.previewSection.children.length, 2);
+  assert.strictEqual(panel.translatedPreviewText.value, "");
+  assert.strictEqual(panel.originalPreviewText.value, "");
+  assert.strictEqual(panel.translatedPreviewText.readOnly, true);
+  assert.strictEqual(panel.originalPreviewText.readOnly, true);
+  assert.strictEqual(panel.translatedCopyButton.disabled, true);
+  assert.strictEqual(panel.originalCopyButton.disabled, true);
+  assert.strictEqual(panel.previewSection.textContent, "");
   const qwenButton = panel.providerCardMap.get("qwen-mt");
   const deepSeekButton = panel.providerCardMap.get("deepseek");
   const geminiButton = panel.providerCardMap.get("gemini");
   const bingButton = panel.providerCardMap.get("bing");
-  assert.strictEqual(qwenButton.children[1].textContent, "千问 (Qwen)");
+  assert.strictEqual(qwenButton.children[1].textContent, "Qwen");
   assert.strictEqual(deepSeekButton.children[1].textContent, "DeepSeek");
   assert.strictEqual(geminiButton.children[1].textContent, "Gemini");
   assert.strictEqual(bingButton.children[1].textContent, "Bing");
-  const qwenLogo = qwenButton.children[0].children[0].children[0];
-  const qwenLogoFallback = qwenButton.children[0].children[0].children[1];
-  const deepSeekLogo = deepSeekButton.children[0].children[0].children[0];
-  assert.strictEqual(qwenLogo.src, "icons/qwen-symbol-32.png");
-  assert.strictEqual(deepSeekLogo.src, "icons/deepseek-symbol-32.png");
-  assert.strictEqual(qwenLogo.style.borderRadius, "50%");
-  assert.strictEqual(deepSeekLogo.style.borderRadius, "50%");
+  assert.strictEqual(qwenButton.children.length, 3);
+  const qwenLogo = qwenButton.children[0].children[0];
+  const qwenLogoFallback = qwenButton.children[0].children[1];
+  const deepSeekLogo = deepSeekButton.children[0].children[0];
+  assert.strictEqual(qwenLogo.src, "icons/qwen-symbol-hd.png");
+  assert.strictEqual(deepSeekLogo.src, "icons/deepseek-symbol-hd.png");
+  assert.strictEqual(qwenLogo.style.borderRadius, "10px");
+  assert.strictEqual(deepSeekLogo.style.borderRadius, "10px");
   assert.strictEqual(qwenLogo.style.width, "42px");
   assert.strictEqual(deepSeekLogo.style.width, "42px");
   assert.strictEqual(qwenLogo.style.height, "42px");
@@ -159,6 +180,10 @@ const overlay = context.SelectionReplacerOverlay;
   assert.strictEqual(deepSeekLogo.style.objectFit, "cover");
   assert.strictEqual(qwenLogo.style.padding, "0");
   assert.strictEqual(deepSeekLogo.style.padding, "0");
+  assert.strictEqual(qwenLogo.style.border, "0");
+  assert.strictEqual(deepSeekLogo.style.border, "0");
+  assert.strictEqual(qwenLogo.style.background, "transparent");
+  assert.strictEqual(deepSeekLogo.style.background, "transparent");
   assert.strictEqual(qwenLogo.style.overflow, "hidden");
   assert.strictEqual(deepSeekLogo.style.overflow, "hidden");
   qwenLogo.onerror();
@@ -186,6 +211,10 @@ const overlay = context.SelectionReplacerOverlay;
   assert.strictEqual(panel.inputSection.style.display, "flex");
   assert.strictEqual(panel.actions.style.display, "flex");
   assert.strictEqual(panel.providerHeaderLabel.textContent, "Gemini");
+  const headerLogo = panel.providerHeaderLogo.children[0].children[0];
+  assert.strictEqual(headerLogo.style.width, "26px");
+  assert.strictEqual(headerLogo.style.height, "26px");
+  assert.strictEqual(geminiButton.style.border, "0");
 
   panel.savedKey = "sk-example-secret-f2c";
   panel.inputDirty = false;
@@ -205,6 +234,58 @@ const overlay = context.SelectionReplacerOverlay;
   assert.strictEqual(panel.apiInput.value, "");
   assert.strictEqual(panel.providerButtons.style.gridTemplateColumns,
     "repeat(3, minmax(0, 1fr))");
+
+  const preview = replacerTest.makeTranslationPreview([
+    { id: "first", sourceText: "第一段原文" },
+    { id: "failed", sourceText: "失败段原文" },
+    { id: "second", sourceText: "第二段原文" }
+  ], new Map([
+    ["first", { status: "translated", translatedText: "第一段译文" }],
+    ["failed", { status: "failed", translatedText: "不应显示" }],
+    ["second", { status: "cached", translatedText: "第二段译文" }]
+  ]));
+  assert.strictEqual(preview.originalText, "第一段原文\n\n第二段原文");
+  assert.strictEqual(preview.translatedText, "第一段译文\n\n第二段译文");
+
+  const previewReader = { itemID: 1 };
+  const realGetReaderForItem = replacerTest.getReaderForItem;
+  replacerTest.getReaderForItem = () => previewReader;
+  replacerTest.setLatestTranslationPreview(previewReader, preview);
+  assert.strictEqual(panel.translatedPreviewText.value, "第一段译文\n\n第二段译文");
+  assert.strictEqual(panel.originalPreviewText.value, "第一段原文\n\n第二段原文");
+  assert.strictEqual(panel.translatedCopyButton.disabled, false);
+  assert.strictEqual(panel.originalCopyButton.disabled, false);
+  assert.strictEqual(replacerTest.copyPreviewText(panel, "translated"), true);
+  assert.strictEqual(clipboardWrites.at(-1), "第一段译文\n\n第二段译文");
+  assert.strictEqual(panel.translatedCopyButton.children[0].textContent, "✓");
+  assert.strictEqual(panel.translatedCopyButton.attributes["aria-label"], "已复制译文");
+
+  replacerTest.setLatestTranslationPreview(previewReader, {
+    originalText: "新原文", translatedText: "新译文"
+  });
+  assert.strictEqual(panel.translatedPreviewText.value, "新译文");
+  assert.strictEqual(panel.originalPreviewText.value, "新原文");
+  assert.strictEqual(panel.translatedCopyButton.children[0].textContent, "⧉");
+  assert.strictEqual(replacerTest.copyPreviewText(panel, "original"), true);
+  assert.strictEqual(clipboardWrites.at(-1), "新原文");
+  assert.strictEqual(panel.originalCopyButton.children[0].textContent, "✓");
+
+  const clipboardClass = context.Components.classes["@mozilla.org/widget/clipboardhelper;1"];
+  const realGetService = clipboardClass.getService;
+  clipboardClass.getService = () => { throw new Error("clipboard unavailable"); };
+  replacerTest.setLatestTranslationPreview(previewReader, {
+    originalText: "失败复制原文", translatedText: "失败复制译文"
+  });
+  assert.strictEqual(replacerTest.copyPreviewText(panel, "translated"), false);
+  assert.strictEqual(panel.translatedCopyButton.children[0].textContent, "⧉");
+  clipboardClass.getService = realGetService;
+
+  replacerTest.clearLatestTranslationPreview(previewReader);
+  assert.strictEqual(panel.translatedPreviewText.value, "");
+  assert.strictEqual(panel.originalPreviewText.value, "");
+  assert.strictEqual(panel.translatedCopyButton.disabled, true);
+  assert.strictEqual(panel.originalCopyButton.disabled, true);
+  replacerTest.getReaderForItem = realGetReaderForItem;
 }
 
 function makeFixture(paragraphLineCounts) {

@@ -22,6 +22,12 @@ PACKAGED_FILES = {
     "icons/bing-symbol-32.svg",
     "icons/transmart-symbol-32.svg",
     "icons/cnki-symbol-32.svg",
+    "icons/qwen-symbol-hd.png",
+    "icons/deepseek-symbol-hd.png",
+    "icons/gemini-symbol-hd.png",
+    "icons/bing-symbol-hd.png",
+    "icons/transmart-symbol-hd.png",
+    "icons/cnki-symbol-hd.png",
     "locale/en-US/reader-selection-replacer-test.ftl",
     "locale/zh-CN/reader-selection-replacer-test.ftl",
 }
@@ -124,12 +130,45 @@ def test_selection_replacer_uses_reader_selection_event_and_no_network() -> None
     for provider_id in ["qwen-mt", "deepseek", "gemini", "bing", "transmart", "cnki"]:
         assert f'"{provider_id}"' in source
     assert "reader-selection-replacer-test-pane-provider-${providerID}" in source
-    assert "icons/qwen-symbol-32.png" in source
-    assert "icons/deepseek-symbol-32.png" in source
-    assert "icons/gemini-symbol-32.svg" in source
-    assert "icons/bing-symbol-32.svg" in source
-    assert "icons/transmart-symbol-32.svg" in source
-    assert "icons/cnki-symbol-32.svg" in source
+    assert "icons/qwen-symbol-hd.png" in source
+    assert "icons/deepseek-symbol-hd.png" in source
+    assert "icons/gemini-symbol-hd.png" in source
+    assert "icons/bing-symbol-hd.png" in source
+    assert "icons/transmart-symbol-hd.png" in source
+    assert "icons/cnki-symbol-hd.png" in source
+    provider_ui = source[
+        source.index("const TRANSLATION_PROVIDER_UI"):
+        source.index("const TRANSLATION_PROVIDER_UI_BY_ID")
+    ]
+    assert "description:" not in provider_ui
+    assert 'label: "Qwen"' in provider_ui
+    assert 'label: "CNKI"' in provider_ui
+    assert "DEFAULT_SIDEBAR_WIDTH" not in source
+    assert "restoreDefaultSidebarWidth" not in source
+    assert "defaultSidebarWidth" not in source
+    render_source = source[
+        source.index("  renderItemPane({"):
+        source.index("  async selectProviderForPanels")
+    ]
+    assert "modelHeader" not in render_source
+    assert 'flexDirection: "row"' in source
+    assert 'minHeight: "72px"' in source
+    assert 'minHeight: "48px"' in source
+    assert 'marginTop: "12px"' in source
+    assert 'makeProviderLogo(doc, providerID, 26)' in source
+    assert '2px solid rgba(255,255,255,.82)' not in source
+    assert "latestTranslationPreviews" in source
+    assert "makeTranslationPreview" in source
+    assert "data-translation-preview" in source
+    assert "copyPreviewText" in source
+    assert '"@mozilla.org/widget/clipboardhelper;1"' in source
+    assert 'color: "#8c73fc"' in source
+    assert 'color: "#052cba"' in source
+    assert 'color: "#3d0191"' in source
+    assert 'color: "#02c684"' in source
+    assert 'color: "#00b0fd"' in source
+    assert 'color: "#a8010b"' in source
+    assert not (PLUGIN / "prefs.js").exists()
     assert 'NO_ACTIVE_TRANSLATION_PROVIDER = "none"' in translation_source
     assert 'code: "no-provider"' in translation_source
     assert "icons/qwen-20.png" not in source

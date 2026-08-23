@@ -30,51 +30,45 @@ const AUTO_TARGET_LABELS = Object.freeze({
 const TRANSLATION_PROVIDER_UI = Object.freeze([
   Object.freeze({
     id: "qwen-mt",
-    label: "千问 (Qwen)",
-    description: "阿里云通义千问大模型，中文能力优秀。",
-    icon: "icons/qwen-symbol-32.png",
+    label: "Qwen",
+    icon: "icons/qwen-symbol-hd.png",
     fallback: "Q",
-    color: "#2f2d48"
+    color: "#8c73fc"
   }),
   Object.freeze({
     id: "deepseek",
     label: "DeepSeek",
-    description: "深度求索开源大模型，编码推理逻辑清晰。",
-    icon: "icons/deepseek-symbol-32.png",
+    icon: "icons/deepseek-symbol-hd.png",
     fallback: "D",
-    color: "#2c3552"
+    color: "#052cba"
   }),
   Object.freeze({
     id: "gemini",
     label: "Gemini",
-    description: "谷歌推出的多模态AI大模型，性能卓越响应快。",
-    icon: "icons/gemini-symbol-32.svg",
+    icon: "icons/gemini-symbol-hd.png",
     fallback: "✦",
-    color: "#202b45"
+    color: "#3d0191"
   }),
   Object.freeze({
     id: "bing",
     label: "Bing",
-    description: "微软必应免费翻译服务，支持多语种日常翻译。",
-    icon: "icons/bing-symbol-32.svg",
+    icon: "icons/bing-symbol-hd.png",
     fallback: "b",
-    color: "#2d394d"
+    color: "#02c684"
   }),
   Object.freeze({
     id: "transmart",
     label: "Transmart",
-    description: "腾讯文言翻译免费版，精准度高，术语识别强。",
-    icon: "icons/transmart-symbol-32.svg",
+    icon: "icons/transmart-symbol-hd.png",
     fallback: "T",
-    color: "#24465a"
+    color: "#00b0fd"
   }),
   Object.freeze({
     id: "cnki",
-    label: "CNKI (知网)",
-    description: "知网免费学术翻译，专注文献、学术场景。",
-    icon: "icons/cnki-symbol-32.svg",
+    label: "CNKI",
+    icon: "icons/cnki-symbol-hd.png",
     fallback: "知",
-    color: "#553031"
+    color: "#a8010b"
   })
 ]);
 const TRANSLATION_PROVIDER_UI_BY_ID = Object.freeze(
@@ -3827,6 +3821,8 @@ var SelectionReplacerTest = {
   providerStates: new Map(),
   autoSessions: new Map(),
   selectionSessions: new Map(),
+  latestTranslationPreviews: new Map(),
+  translationPreviewRevision: 0,
   selectionTaskCounter: 0,
   startingReaders: new Set(),
   readerListenersRegistered: new Set(),
@@ -3938,6 +3934,8 @@ var SelectionReplacerTest = {
     this.autoSessions.clear();
     for (const session of this.selectionSessions.values()) session.cancelled = true;
     this.selectionSessions.clear();
+    this.latestTranslationPreviews.clear();
+    this.translationPreviewRevision = 0;
     this.startingReaders.clear();
     this.readerListenersRegistered.clear();
     this.readerStatus.clear();
@@ -4102,6 +4100,222 @@ var SelectionReplacerTest = {
     // a compatibility no-op for the existing retry and legacy call sites.
   },
 
+  normalizePreviewText(value) {
+    return String(value || "")
+      .replace(/<\s*br\s*\/?>/giu, "\n")
+      .replace(/<[^>]*>/gu, "")
+      .trim();
+  },
+
+  makeTranslationPreview(segments, results) {
+    const original = [];
+    const translated = [];
+    for (const segment of segments || []) {
+      const result = results?.get?.(segment?.id);
+      if (!["cached", "translated"].includes(result?.status)) continue;
+      const originalText = this.normalizePreviewText(segment?.sourceText);
+      const translatedText = this.normalizePreviewText(result?.translatedText);
+      if (!originalText || !translatedText) continue;
+      original.push(originalText);
+      translated.push(translatedText);
+    }
+    return {
+      originalText: original.join("\n\n"),
+      translatedText: translated.join("\n\n")
+    };
+  },
+
+  setLatestTranslationPreview(reader, preview) {
+    if (!reader) return;
+    const originalText = this.normalizePreviewText(preview?.originalText);
+    const translatedText = this.normalizePreviewText(preview?.translatedText);
+    if (!originalText || !translatedText) {
+      this.latestTranslationPreviews.delete(reader);
+    }
+    else {
+      this.latestTranslationPreviews.set(reader, {
+        itemID: reader.itemID ?? null,
+        originalText,
+        translatedText,
+        revision: ++this.translationPreviewRevision
+      });
+    }
+    this.refreshAllPanels();
+  },
+
+  clearLatestTranslationPreview(reader) {
+    if (reader) this.latestTranslationPreviews.delete(reader);
+    else this.latestTranslationPreviews.clear();
+    this.refreshAllPanels();
+  },
+
+  makePreviewCopyButton(doc, type) {
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.dataset.previewCopy = type;
+    this.stylePanel(button, {
+      position: "absolute",
+      top: "6px",
+      right: "6px",
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: "24px",
+      height: "24px",
+      padding: "0",
+      border: "0",
+      borderRadius: "5px",
+      color: "var(--fill-secondary, #aeb0b6)",
+      background: "transparent",
+      cursor: "pointer",
+      appearance: "none"
+    });
+    this.setPreviewCopyButtonState(button, false, doc);
+    return button;
+  },
+
+  setPreviewCopyButtonState(button, copied, doc = button?.ownerDocument) {
+    if (!button) return;
+    const type = button.dataset?.previewCopy || "translated";
+    const isTranslated = type === "translated";
+    const l10nID = copied
+      ? `reader-selection-replacer-test-pane-copy-${type}-copied`
+      : `reader-selection-replacer-test-pane-copy-${type}`;
+    const fallback = copied
+      ? (isTranslated ? "已复制译文" : "已复制原文")
+      : (isTranslated ? "复制译文" : "复制原文");
+    button.replaceChildren?.();
+    let icon = null;
+    if (doc?.createElementNS) {
+      const svgNS = "http://www.w3.org/2000/svg";
+      const svg = doc.createElementNS(svgNS, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      svg.setAttribute("focusable", "false");
+      svg.style.width = "16px";
+      svg.style.height = "16px";
+      const path = doc.createElementNS(svgNS, "path");
+      path.setAttribute("d", copied
+        ? "M5 12.5 9.5 17 19 7"
+        : "M9 5h10v14H9zM5 19H4V3h12v2");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.9");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      svg.append(path);
+      icon = svg;
+    }
+    else if (doc?.createElement) {
+      icon = doc.createElement("span");
+      icon.textContent = copied ? "✓" : "⧉";
+      icon.setAttribute("aria-hidden", "true");
+    }
+    if (icon) button.append?.(icon);
+    this.setPanelAttributes(button, l10nID, { "aria-label": fallback }, doc);
+  },
+
+  makeTranslationPreviewBox(doc, type) {
+    const wrapper = doc.createElement("div");
+    wrapper.setAttribute("data-translation-preview-box", type);
+    this.stylePanel(wrapper, {
+      position: "relative",
+      width: "100%",
+      boxSizing: "border-box"
+    });
+    const text = doc.createElement("textarea");
+    text.setAttribute("data-translation-preview-text", type);
+    text.readOnly = true;
+    text.spellcheck = false;
+    text.wrap = "soft";
+    text.value = "";
+    this.stylePanel(text, {
+      display: "block",
+      boxSizing: "border-box",
+      width: "100%",
+      minHeight: "72px",
+      maxHeight: "220px",
+      margin: "0",
+      padding: "8px 36px 8px 10px",
+      border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+      borderRadius: "8px",
+      color: "var(--fill-secondary, #c4c6cc)",
+      background: "transparent",
+      font: "inherit",
+      fontSize: "13px",
+      lineHeight: "1.4",
+      resize: "none",
+      overflow: "auto"
+    });
+    const copyButton = this.makePreviewCopyButton(doc, type);
+    wrapper.append(text, copyButton);
+    return { wrapper, text, copyButton };
+  },
+
+  updateTranslationPreviewPanel(state) {
+    if (!state?.translatedPreviewText || !state?.originalPreviewText) return;
+    const reader = this.getReaderForItem(state.itemID);
+    const candidate = reader ? this.latestTranslationPreviews.get(reader) : null;
+    const sameItem = candidate && reader
+      && String(candidate.itemID ?? "") === String(reader.itemID ?? "");
+    const preview = sameItem ? candidate : null;
+    const translatedText = preview?.translatedText || "";
+    const originalText = preview?.originalText || "";
+    const signature = `${preview?.revision || 0}\u0000${translatedText}\u0000${originalText}`;
+    if (state.previewSignature !== signature) {
+      state.translatedPreviewText.value = translatedText;
+      state.originalPreviewText.value = originalText;
+      this.setPreviewCopyButtonState(state.translatedCopyButton, false,
+        state.translatedPreviewText.ownerDocument);
+      this.setPreviewCopyButtonState(state.originalCopyButton, false,
+        state.originalPreviewText.ownerDocument);
+      state.previewSignature = signature;
+    }
+    state.translatedCopyButton.disabled = !translatedText;
+    state.originalCopyButton.disabled = !originalText;
+    state.translatedCopyButton.style.opacity = translatedText ? "0.85" : "0.45";
+    state.originalCopyButton.style.opacity = originalText ? "0.85" : "0.45";
+  },
+
+  copyPreviewText(state, type) {
+    const isTranslated = type === "translated";
+    const textElement = isTranslated
+      ? state?.translatedPreviewText : state?.originalPreviewText;
+    const button = isTranslated
+      ? state?.translatedCopyButton : state?.originalCopyButton;
+    const text = String(textElement?.value || "").trim();
+    if (!text || !button || button.disabled) return false;
+    let clipboardError = null;
+    try {
+      const classes = globalThis.Components?.classes;
+      const interfaces = globalThis.Components?.interfaces;
+      const helper = classes?.["@mozilla.org/widget/clipboardhelper;1"]
+        ?.getService?.(interfaces?.nsIClipboardHelper);
+      if (helper?.copyString) {
+        helper.copyString(text);
+        this.setPreviewCopyButtonState(button, true, textElement.ownerDocument);
+        return true;
+      }
+    }
+    catch (error) {
+      clipboardError = error;
+    }
+    const doc = textElement.ownerDocument;
+    const clipboard = doc?.defaultView?.navigator?.clipboard
+      || globalThis.navigator?.clipboard;
+    if (typeof clipboard?.writeText === "function") {
+      return Promise.resolve(clipboard.writeText(text)).then(() => {
+        this.setPreviewCopyButtonState(button, true, doc);
+        return true;
+      }).catch(error => {
+        Zotero.logError?.(error);
+        return false;
+      });
+    }
+    if (clipboardError) Zotero.logError?.(clipboardError);
+    return false;
+  },
+
   async legacySaveAPIKeyFromPanel(state) {
     const apiKey = String(state?.apiInput?.value || "").trim();
     if (!apiKey) {
@@ -4173,7 +4387,9 @@ var SelectionReplacerTest = {
   refreshAllPanels() {
     for (const state of [...this.panelStates]) {
       if (state.body?.isConnected === false) this.panelStates.delete(state);
-      else this.updatePanelState(state);
+      else {
+        this.updatePanelState(state);
+      }
     }
   },
 
@@ -4343,25 +4559,26 @@ var SelectionReplacerTest = {
     style.textContent = `
       [data-provider-cards="true"] {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 14px;
+        grid-template-columns: repeat(3, minmax(0, 160px));
+        justify-content: center;
+        gap: 10px;
       }
       [data-provider-card="true"] {
         min-width: 0;
       }
       @media (max-width: 520px) {
         [data-provider-card="true"] {
-          min-height: 116px !important;
-          padding: 12px !important;
+          min-height: 60px !important;
+          height: 60px !important;
+          padding: 6px 8px !important;
         }
-        [data-provider-card-label="true"],
-        [data-provider-card-description="true"] {
+        [data-provider-card-label="true"] {
           display: none !important;
         }
         [data-provider-card-logo="true"] {
-          width: 34px !important;
-          height: 34px !important;
-          flex-basis: 34px !important;
+          width: 28px !important;
+          height: 28px !important;
+          flex-basis: 28px !important;
         }
       }
     `;
@@ -4388,12 +4605,13 @@ var SelectionReplacerTest = {
       display: "block",
       width: `${size}px`,
       height: `${size}px`,
-      borderRadius: "50%",
+      borderRadius: "10px",
+      border: "0",
       objectFit: "cover",
       boxSizing: "border-box",
       padding: "0",
       overflow: "hidden",
-      background: "var(--fill-quaternary, rgba(255,255,255,.9))",
+      background: "transparent",
       flex: `0 0 ${size}px`
     });
 
@@ -4407,7 +4625,8 @@ var SelectionReplacerTest = {
       justifyContent: "center",
       width: `${size}px`,
       height: `${size}px`,
-      borderRadius: "50%",
+      borderRadius: "10px",
+      border: "0",
       flex: `0 0 ${size}px`,
       color: "var(--fill-primary, inherit)",
       background: "var(--material-button-hover, rgba(127,127,127,.22))",
@@ -4439,30 +4658,25 @@ var SelectionReplacerTest = {
     button.setAttribute("data-provider-card", "true");
     button.setAttribute("aria-label", metadata.label);
     this.stylePanel(button, {
-      minHeight: "240px",
-      padding: "26px 24px 22px",
+      minHeight: "72px",
+      height: "72px",
+      padding: "8px 12px",
       border: "0",
       borderRadius: "12px",
       background: metadata.color,
       color: "#f2f3f7",
       textAlign: "left",
       display: "flex",
-      flexDirection: "column",
-      alignItems: "stretch",
-      justifyContent: "space-between",
-      gap: "18px",
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "flex-start",
+      gap: "10px",
       boxSizing: "border-box",
       boxShadow: "0 2px 4px rgba(0,0,0,.18)",
-      cursor: "pointer"
+      cursor: "pointer",
+      position: "relative"
     });
 
-    const top = doc.createElement("span");
-    this.stylePanel(top, {
-      display: "flex",
-      alignItems: "flex-start",
-      justifyContent: "space-between",
-      minHeight: "42px"
-    });
     const logo = this.makeProviderLogo(doc, metadata.id, 42);
     const check = doc.createElement("span");
     check.textContent = "✓";
@@ -4470,13 +4684,14 @@ var SelectionReplacerTest = {
     check.setAttribute("data-provider-card-check", metadata.id);
     this.stylePanel(check, {
       visibility: "hidden",
+      position: "absolute",
+      top: "8px",
+      right: "10px",
       color: "#f2f3f7",
-      fontSize: "25px",
+      fontSize: "21px",
       lineHeight: "1",
       fontWeight: "600"
     });
-    top.append(logo, check);
-
     const label = doc.createElement("strong");
     label.setAttribute("data-provider-card-label", "true");
     this.setPanelText(label,
@@ -4484,26 +4699,13 @@ var SelectionReplacerTest = {
       metadata.label, doc);
     this.stylePanel(label, {
       display: "block",
-      fontSize: "23px",
+      fontSize: "17px",
       lineHeight: "1.15",
       fontWeight: "700",
       letterSpacing: "-.02em"
     });
 
-    const description = doc.createElement("span");
-    description.setAttribute("data-provider-card-description", "true");
-    this.setPanelText(description,
-      `reader-selection-replacer-test-pane-provider-${metadata.id}-description`,
-      metadata.description, doc);
-    this.stylePanel(description, {
-      display: "block",
-      minHeight: "48px",
-      color: "rgba(242,243,247,.76)",
-      fontSize: "16px",
-      lineHeight: "1.45"
-    });
-
-    button.append(top, label, description);
+    button.append(logo, label, check);
     return button;
   },
 
@@ -4525,62 +4727,8 @@ var SelectionReplacerTest = {
       color: "var(--fill-primary, inherit)",
       fontSize: "14px",
       boxSizing: "border-box",
-      width: "100%"
-    });
-
-    const modelHeader = doc.createElement("button");
-    modelHeader.type = "button";
-    modelHeader.setAttribute("aria-expanded", "true");
-    this.stylePanel(modelHeader, {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
       width: "100%",
-      minHeight: "72px",
-      padding: "14px 16px",
-      border: "0",
-      borderBottom: "1px solid var(--fill-quinary, rgba(0,0,0,.24))",
-      borderRadius: "0",
-      background: "transparent",
-      color: "inherit",
-      font: "inherit",
-      cursor: "pointer"
-    });
-    const modelTitle = doc.createElement("span");
-    this.setPanelText(modelTitle,
-      "reader-selection-replacer-test-pane-model-selection", "选择翻译模型", doc);
-    this.stylePanel(modelTitle, {
-      fontSize: "24px",
-      fontWeight: "700",
-      lineHeight: "1.2"
-    });
-    const modelTitleGroup = doc.createElement("span");
-    this.stylePanel(modelTitleGroup, {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: "12px",
-      minWidth: "0"
-    });
-    const modelIcon = doc.createElement("span");
-    modelIcon.textContent = "▤";
-    modelIcon.setAttribute("aria-hidden", "true");
-    this.stylePanel(modelIcon, {
-      color: "var(--fill-secondary, #aeb0b6)",
-      fontSize: "28px",
-      lineHeight: "1"
-    });
-    modelTitleGroup.append(modelIcon, modelTitle);
-    const modelChevron = doc.createElement("span");
-    modelChevron.textContent = "⌃";
-    modelChevron.setAttribute("aria-hidden", "true");
-    this.stylePanel(modelChevron, { fontSize: "24px", opacity: "0.7" });
-    modelHeader.append(modelTitleGroup, modelChevron);
-
-    const modelContent = doc.createElement("div");
-    this.stylePanel(modelContent, {
-      display: "block",
-      padding: "18px 14px 20px",
-      boxSizing: "border-box"
+      marginTop: "12px"
     });
 
     const providerPanel = doc.createElement("div");
@@ -4601,8 +4749,8 @@ var SelectionReplacerTest = {
       alignItems: "center",
       justifyContent: "space-between",
       width: "100%",
-      minHeight: "82px",
-      padding: "14px 22px",
+      minHeight: "48px",
+      padding: "6px 12px",
       border: "0",
       borderBottom: "1px solid var(--fill-quinary, rgba(0,0,0,.35))",
       borderRadius: "0",
@@ -4615,10 +4763,10 @@ var SelectionReplacerTest = {
     this.stylePanel(providerTitle, {
       display: "inline-flex",
       alignItems: "center",
-      gap: "12px",
+      gap: "6px",
       minWidth: "0",
       color: "var(--fill-secondary, #aeb0b6)",
-      fontSize: "22px",
+      fontSize: "15px",
       fontWeight: "600"
     });
     const providerHeaderLogo = doc.createElement("span");
@@ -4627,20 +4775,20 @@ var SelectionReplacerTest = {
     const providerChevron = doc.createElement("span");
     providerChevron.textContent = "⌃";
     providerChevron.setAttribute("aria-hidden", "true");
-    this.stylePanel(providerChevron, { fontSize: "24px", opacity: "0.7" });
+    this.stylePanel(providerChevron, { fontSize: "18px", opacity: "0.7" });
     providerHeader.append(providerTitle, providerChevron);
 
     const providerContent = doc.createElement("div");
     this.stylePanel(providerContent, {
       display: "block",
-      padding: "18px 24px 24px"
+      padding: "10px 14px 14px"
     });
     const providerButtons = doc.createElement("div");
     providerButtons.setAttribute("data-provider-cards", "true");
     this.stylePanel(providerButtons, {
       display: "grid",
       gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-      gap: "14px"
+      gap: "10px"
     });
     for (const metadata of TRANSLATION_PROVIDER_UI) {
       providerButtons.append(this.makeProviderCard(doc, metadata));
@@ -4649,7 +4797,7 @@ var SelectionReplacerTest = {
     const divider = doc.createElement("div");
     this.stylePanel(divider, {
       height: "1px",
-      margin: "24px 0 20px",
+      margin: "16px 0 14px",
       background: "var(--fill-quinary, rgba(0,0,0,.42))"
     });
 
@@ -4724,8 +4872,19 @@ var SelectionReplacerTest = {
 
     providerContent.append(providerButtons, divider, inputSection, actions);
     providerPanel.append(providerHeader, providerContent);
-    modelContent.append(providerPanel);
-    container.append(modelHeader, modelContent);
+    const previewSection = doc.createElement("div");
+    previewSection.setAttribute("data-translation-preview", "true");
+    this.stylePanel(previewSection, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px",
+      width: "100%",
+      marginTop: "10px"
+    });
+    const translatedPreview = this.makeTranslationPreviewBox(doc, "translated");
+    const originalPreview = this.makeTranslationPreviewBox(doc, "original");
+    previewSection.append(translatedPreview.wrapper, originalPreview.wrapper);
+    container.append(providerPanel, previewSection);
     body.append(container);
 
     const providerCardMap = new Map(
@@ -4736,9 +4895,6 @@ var SelectionReplacerTest = {
       itemID: item?.id || null,
       tabType,
       container,
-      modelHeader,
-      modelIcon,
-      modelContent,
       providerPanel,
       providerHeader,
       providerHeaderLogo,
@@ -4747,6 +4903,11 @@ var SelectionReplacerTest = {
       providerContent,
       providerButtons,
       providerCardMap,
+      previewSection,
+      translatedPreviewText: translatedPreview.text,
+      originalPreviewText: originalPreview.text,
+      translatedCopyButton: translatedPreview.copyButton,
+      originalCopyButton: originalPreview.copyButton,
       divider,
       inputSection,
       apiInput,
@@ -4759,17 +4920,12 @@ var SelectionReplacerTest = {
       saveKey,
       providerID: this.activeProviderID || "",
       savedKey: "",
-      loadToken: 0
+      loadToken: 0,
+      previewSignature: ""
     };
     state.qwenButton = providerCardMap.get("qwen-mt");
     state.deepSeekButton = providerCardMap.get("deepseek");
     this.panelStates.add(state);
-    modelHeader.addEventListener("click", () => {
-      const expanded = modelHeader.getAttribute("aria-expanded") !== "false";
-      modelHeader.setAttribute("aria-expanded", String(!expanded));
-      modelContent.style.display = expanded ? "none" : "block";
-      modelChevron.textContent = expanded ? "⌄" : "⌃";
-    });
     providerHeader.addEventListener("click", () => {
       const expanded = providerHeader.getAttribute("aria-expanded") !== "false";
       providerHeader.setAttribute("aria-expanded", String(!expanded));
@@ -4779,6 +4935,10 @@ var SelectionReplacerTest = {
     for (const [providerID, button] of providerCardMap) {
       button.addEventListener("click", () => this.selectProviderForPanels(providerID));
     }
+    translatedPreview.copyButton.addEventListener("click",
+      () => this.copyPreviewText(state, "translated"));
+    originalPreview.copyButton.addEventListener("click",
+      () => this.copyPreviewText(state, "original"));
     apiInput.addEventListener("input", () => {
       state.inputDirty = true;
       state.maskedPreview = false;
@@ -4793,7 +4953,12 @@ var SelectionReplacerTest = {
 
   async selectProviderForPanels(providerID) {
     const id = TRANSLATION_PROVIDER_UI_BY_ID[providerID] ? providerID : "";
+    const previousID = this.activeProviderID;
     this.activeProviderID = globalThis.setActiveTranslationProviderID?.(id) || id;
+    if (previousID !== this.activeProviderID) {
+      this.latestTranslationPreviews.clear();
+      this.refreshAllPanels();
+    }
     await Promise.all([...this.panelStates].map(state => {
       state.providerID = this.activeProviderID;
       return this.loadProviderIntoPanel(state, true);
@@ -5008,18 +5173,16 @@ var SelectionReplacerTest = {
       const selected = cardID === providerID;
       const card = this.getProviderUI(cardID);
       button.setAttribute("aria-pressed", String(selected));
-      button.style.border = selected ? "2px solid rgba(255,255,255,.82)" : "0";
-      button.style.padding = selected ? "24px 22px 20px" : "26px 24px 22px";
+      button.style.border = "0";
+      button.style.padding = "8px 12px";
       button.style.background = card?.color || "var(--material-button, transparent)";
-      button.style.boxShadow = selected
-        ? "0 0 0 2px rgba(255,255,255,.18), 0 2px 5px rgba(0,0,0,.24)"
-        : "0 2px 4px rgba(0,0,0,.18)";
-      const check = button.children?.[0]?.children?.[1];
+      button.style.boxShadow = "0 2px 4px rgba(0,0,0,.18)";
+      const check = button.children?.[2];
       if (check) check.style.visibility = selected ? "visible" : "hidden";
     }
     state.providerHeaderLogo.replaceChildren?.();
     if (metadata) {
-      state.providerHeaderLogo.append(this.makeProviderLogo(doc, providerID, 42));
+      state.providerHeaderLogo.append(this.makeProviderLogo(doc, providerID, 26));
       this.setPanelText(state.providerHeaderLabel,
         `reader-selection-replacer-test-pane-provider-${providerID}`,
         metadata.label, doc);
@@ -5027,7 +5190,7 @@ var SelectionReplacerTest = {
     }
     else {
       this.setPanelText(state.providerHeaderLabel,
-        "reader-selection-replacer-test-pane-no-provider", "未选择模型",
+        "reader-selection-replacer-test-pane-no-provider", "选择翻译模型",
         doc);
       state.providerHeaderLabel.style.color = "var(--fill-secondary, #aeb0b6)";
     }
@@ -5067,6 +5230,7 @@ var SelectionReplacerTest = {
     state.retryValidation.disabled = providerState.status === "validating";
     state.saveKey.disabled = !keyedProvider || providerState.status === "validating";
     state.resetKey.disabled = !keyedProvider || providerState.status === "validating";
+    this.updateTranslationPreviewPanel(state);
   },
 
   formatAutoTargetStatus(session, kind) {
@@ -5179,6 +5343,7 @@ var SelectionReplacerTest = {
       if (previous) previous.cancelled = true;
     }
     this.startingReaders.add(reader);
+    this.clearLatestTranslationPreview(reader);
     this.setReaderStatus(reader, "正在识别标题/摘要…");
     let session = null;
     try {
@@ -5230,6 +5395,8 @@ var SelectionReplacerTest = {
       session.translation = translation;
       session.translationAttempt = translation;
       session.translation.results = combinedResults;
+      this.setLatestTranslationPreview(reader,
+        this.makeTranslationPreview(segments, combinedResults));
       if (targets.length) {
         SelectionReplacerOverlay.attach(reader, view, targets, {
           mode: "diagnostic", recordID: "front-matter", segments,
@@ -5318,6 +5485,7 @@ var SelectionReplacerTest = {
     const session = { reader, cancelled: false,
       recordID: `selection-${++this.selectionTaskCounter}` };
     this.selectionSessions.set(reader, session);
+    this.clearLatestTranslationPreview(reader);
     try {
       let match;
       try {
@@ -5380,6 +5548,8 @@ var SelectionReplacerTest = {
         translations: translation.results,
         translationPending: false
       });
+      this.setLatestTranslationPreview(reader,
+        this.makeTranslationPreview(match.segments, translation.results));
       const translated = translation.diagnostics.translated + translation.diagnostics.cached;
       status.textContent = `段落翻译完成：${translated}/${match.segments.length}`
         + (translation.diagnostics.failed ? ` · 失败 ${translation.diagnostics.failed}` : "")

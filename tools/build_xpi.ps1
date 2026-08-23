@@ -51,6 +51,12 @@ $packageFiles = @(
     "icons/bing-symbol-32.svg",
     "icons/transmart-symbol-32.svg",
     "icons/cnki-symbol-32.svg",
+    "icons/qwen-symbol-hd.png",
+    "icons/deepseek-symbol-hd.png",
+    "icons/gemini-symbol-hd.png",
+    "icons/bing-symbol-hd.png",
+    "icons/transmart-symbol-hd.png",
+    "icons/cnki-symbol-hd.png",
     "locale/en-US/reader-selection-replacer-test.ftl",
     "locale/zh-CN/reader-selection-replacer-test.ftl"
 )
