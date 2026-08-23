@@ -30,6 +30,7 @@
     readerListenersRegistered: new Set(),
     paneRegistrationRetryTimer: null,
     paneRegistrationRetryCount: 0,
+    firstModelSelectionNoticePromise: null,
 
     async init(rootURI) {
       this.rootURI = rootURI;
@@ -425,8 +426,8 @@
         display: "block",
         boxSizing: "border-box",
         width: "100%",
-        minHeight: "72px",
-        maxHeight: "220px",
+        minHeight: "144px",
+        maxHeight: "440px",
         margin: "0",
         padding: "8px 36px 8px 10px",
         border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",

@@ -4,7 +4,10 @@
   const {
     TRANSLATION_PROVIDER_UI,
     TRANSLATION_PROVIDER_UI_BY_ID,
-    PANEL_STYLE_ID
+    PANEL_STYLE_ID,
+    FIRST_MODEL_SELECTION_NOTICE_SHOWN_PREF,
+    FIRST_MODEL_SELECTION_NOTICE_LOCK_MS,
+    FIRST_MODEL_SELECTION_NOTICE_WARNING
   } = global.TranslatorCore;
 
   const TranslatorProviderPanel = {
@@ -523,7 +526,9 @@
         providerChevron.textContent = expanded ? "⌄" : "⌃";
       });
       for (const [providerID, button] of providerCardMap) {
-        button.addEventListener("click", () => this.selectProviderForPanels(providerID));
+        button.addEventListener("click", () => {
+          this.handleProviderCardClick(providerID, doc).catch(error => Zotero.logError?.(error));
+        });
       }
       translatedPreview.copyButton.addEventListener("click",
         () => this.copyPreviewText(state, "translated"));
@@ -539,6 +544,237 @@
 
       this.updatePanelState(state);
       if (this.activeProviderID) this.loadProviderIntoPanel(state, true);
+    },
+
+    shouldShowFirstModelSelectionNotice() {
+      try {
+        return !Services.prefs.getBoolPref(FIRST_MODEL_SELECTION_NOTICE_SHOWN_PREF, false);
+      }
+      catch (error) {
+        Zotero.logError?.(error);
+        return true;
+      }
+    },
+
+    async handleProviderCardClick(providerID, doc) {
+      if (this.shouldShowFirstModelSelectionNotice()) {
+        await this.showFirstModelSelectionNotice(doc);
+      }
+      await this.selectProviderForPanels(providerID);
+    },
+
+    showFirstModelSelectionNotice(doc) {
+      if (this.firstModelSelectionNoticePromise) {
+        return this.firstModelSelectionNoticePromise;
+      }
+      if (!doc?.createElement) return Promise.resolve();
+
+      const promise = new Promise(resolve => {
+        let overlay = null;
+        let lockTimer = null;
+        let warningHoldTimer = null;
+        let warningFadeTimer = null;
+        let locked = true;
+        let finished = false;
+
+        const clearWarningTimers = () => {
+          if (warningHoldTimer !== null) {
+            clearTimeout(warningHoldTimer);
+            warningHoldTimer = null;
+          }
+          if (warningFadeTimer !== null) {
+            clearTimeout(warningFadeTimer);
+            warningFadeTimer = null;
+          }
+        };
+
+        const markRead = () => {
+          try {
+            Services.prefs.setBoolPref(FIRST_MODEL_SELECTION_NOTICE_SHOWN_PREF, true);
+          }
+          catch (error) {
+            Zotero.logError?.(error);
+          }
+        };
+
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          if (lockTimer !== null) clearTimeout(lockTimer);
+          clearWarningTimers();
+          doc.defaultView?.removeEventListener("keydown", onKeyDown, true);
+          overlay?.remove?.();
+          markRead();
+          resolve();
+        };
+
+        const showWarning = warning => {
+          if (!warning) return;
+          clearWarningTimers();
+          warning.textContent = FIRST_MODEL_SELECTION_NOTICE_WARNING;
+          warning.style.opacity = "1";
+          warningHoldTimer = setTimeout(() => {
+            warningHoldTimer = null;
+            warning.style.opacity = "0";
+            warningFadeTimer = setTimeout(() => {
+              warningFadeTimer = null;
+              if (warning.style.opacity === "0") warning.textContent = "";
+            }, 1200);
+          }, 900);
+        };
+
+        const onKeyDown = event => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          finish();
+        };
+
+        try {
+          const host = doc.body || doc.documentElement;
+          if (!host) throw new Error("侧栏文档没有可用的弹窗容器");
+
+          overlay = doc.createElement("div");
+          overlay.setAttribute("role", "presentation");
+          this.stylePanel(overlay, {
+            position: "fixed",
+            top: "0",
+            right: "0",
+            bottom: "0",
+            left: "0",
+            zIndex: "2147483647",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxSizing: "border-box",
+            padding: "16px",
+            background: "rgba(0, 0, 0, .45)"
+          });
+
+          const card = doc.createElement("div");
+          card.setAttribute("role", "dialog");
+          card.setAttribute("aria-modal", "true");
+          this.stylePanel(card, {
+            position: "relative",
+            boxSizing: "border-box",
+            width: "100%",
+            maxWidth: "520px",
+            padding: "22px 24px 16px",
+            border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+            borderRadius: "11px",
+            background: "var(--material-sidepane, var(--background, #ffffff))",
+            color: "var(--fill-primary, inherit)",
+            boxShadow: "0 12px 30px rgba(0,0,0,.3)",
+            font: "inherit",
+            lineHeight: "1.45"
+          });
+
+          const title = doc.createElement("strong");
+          title.textContent = "使用前须知";
+          title.id = "reader-selection-replacer-test-first-model-notice-title";
+          this.stylePanel(title, {
+            display: "block",
+            margin: "0 32px 14px 0",
+            fontSize: "18px"
+          });
+          card.setAttribute("aria-labelledby", title.id);
+
+          const closeButton = doc.createElement("button");
+          closeButton.type = "button";
+          closeButton.textContent = "×";
+          closeButton.setAttribute("aria-label", "关闭");
+          closeButton.title = "关闭";
+          this.stylePanel(closeButton, {
+            position: "absolute",
+            top: "8px",
+            right: "10px",
+            width: "28px",
+            height: "28px",
+            padding: "0",
+            border: "0",
+            background: "transparent",
+            color: "inherit",
+            font: "inherit",
+            fontSize: "22px",
+            lineHeight: "28px",
+            cursor: "pointer",
+            opacity: "0.72"
+          });
+
+          const makeNoticeLine = text => {
+            const line = doc.createElement("div");
+            line.textContent = text;
+            this.stylePanel(line, { margin: "0 0 10px" });
+            return line;
+          };
+          const line1 = makeNoticeLine("1. 尽量一次只翻译一段文字。");
+          const line2 = makeNoticeLine("2. 不建议跨页、跨栏划选，以免文字顺序错乱。");
+          const line3 = makeNoticeLine("3. 避免混入页眉、页码等内容，以防覆盖块错误生成。");
+
+          const warning = doc.createElement("div");
+          warning.setAttribute("aria-live", "polite");
+          this.stylePanel(warning, {
+            minHeight: "24px",
+            margin: "8px 0 0",
+            color: "#d97706",
+            textAlign: "center",
+            opacity: "0",
+            transition: "opacity 1.2s ease"
+          });
+
+          const confirmButton = doc.createElement("button");
+          confirmButton.type = "button";
+          confirmButton.textContent = "我知道了，开始使用";
+          confirmButton.setAttribute("aria-disabled", "true");
+          this.stylePanel(confirmButton, {
+            display: "block",
+            width: "100%",
+            minHeight: "38px",
+            margin: "10px 0 0",
+            padding: "6px 12px",
+            border: "1px solid var(--fill-quinary, rgba(0,0,0,.55))",
+            borderRadius: "7px",
+            background: "var(--material-button, rgba(127,127,127,.12))",
+            color: "inherit",
+            font: "inherit",
+            cursor: "pointer"
+          });
+
+          closeButton.addEventListener("click", event => {
+            event.preventDefault();
+            finish();
+          });
+          confirmButton.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (locked) {
+              showWarning(warning);
+              return;
+            }
+            finish();
+          });
+
+          card.append(title, closeButton, line1, line2, line3, warning, confirmButton);
+          overlay.append(card);
+          host.append(overlay);
+          doc.defaultView?.addEventListener("keydown", onKeyDown, true);
+          confirmButton.focus?.();
+          lockTimer = setTimeout(() => {
+            lockTimer = null;
+            locked = false;
+            confirmButton.setAttribute("aria-disabled", "false");
+          }, FIRST_MODEL_SELECTION_NOTICE_LOCK_MS);
+        }
+        catch (error) {
+          Zotero.logError?.(error);
+          markRead();
+          resolve();
+        }
+      });
+
+      this.firstModelSelectionNoticePromise = promise.finally(() => {
+        this.firstModelSelectionNoticePromise = null;
+      });
+      return this.firstModelSelectionNoticePromise;
     },
 
     async selectProviderForPanels(providerID) {

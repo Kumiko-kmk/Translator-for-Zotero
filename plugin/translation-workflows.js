@@ -383,13 +383,7 @@
       };
 
       const button = makeTranslationButton("翻译", "翻译当前划选内容");
-      const forceSingleButton = makeTranslationButton(
-        "翻译（强制单段）", "强制单段翻译接口预留，暂未启用"
-      );
-      forceSingleButton.disabled = true;
-      forceSingleButton.setAttribute("data-translation-mode", "force-single-segment");
-      forceSingleButton.setAttribute("aria-disabled", "true");
-      buttonRow.append(button, forceSingleButton);
+      buttonRow.append(button);
 
       const status = doc.createElement("span");
       status.style.fontSize = "11px";
