@@ -146,6 +146,23 @@ Reader selection text + position
 git status -sb
 ```
 
+## 🧪 自动化测试
+
+测试脚本位于 `tests/`，使用 Node.js 内置测试运行器。测试通过 VM 沙箱模拟 Zotero 运行时、PDF 页面和 HTTP 请求，不依赖真实翻译服务或本机 Zotero 配置。
+
+```powershell
+node --test tests/*.test.js
+node --test --test-reporter=spec tests/*.test.js
+```
+
+当前测试重点包括：
+
+- 📄 文本提取：PDF 矩形投影、四种旋转、投影缓存、视口故障、标题/摘要/正文边界和跨页定位；
+- 🧩 文本解析：语言识别、元数据段、单栏/双栏选区、显式与几何段落断点、DeepSeek JSON/选择单元校验和缓存封装；
+- 🌐 网络通信：六个 Provider 的请求协议、鉴权、HTTP/网络重试、文本分片、CNKI Token 缓存、验证码和 TranslationCoordinator 结果。
+
+详见 [`tests/README.md`](../tests/README.md)。测试文件不会被 `tools/build_xpi.ps1` 打入 XPI。
+
 ### ✅ JavaScript 语法检查
 
 ```powershell
