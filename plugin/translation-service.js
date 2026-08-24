@@ -756,6 +756,17 @@ var SegmentTranslationCache = {
     return rows?.[0] || null;
   },
 
+  async remove(attachment, segment, targetLanguage,
+    modelSpec = TranslationModelRegistry.deepseek) {
+    await this.init();
+    if (!this.db) throw new Error("翻译缓存数据库不可用");
+    await this.db.queryAsync(`DELETE FROM segment_translations
+      WHERE library_id=? AND attachment_key=? AND segment_kind=?
+      AND position_signature=? AND source_hash=? AND source_language=?
+      AND target_language=? AND provider=? AND model=? AND prompt_version=?`,
+    this.values(this.key(attachment, segment, targetLanguage, modelSpec)));
+  },
+
   async put(attachment, segment, targetLanguage, translatedText,
     modelSpec = TranslationModelRegistry.deepseek) {
     await this.init();

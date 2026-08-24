@@ -183,16 +183,74 @@
 
     applyTranslationDisplay(root, textNode, badge, showingOriginal, background) {
       if (!root || !textNode) return;
+      const deleteButton = root.querySelector?.(
+        ".reader-selection-replacer-delete-button") || null;
       root.style.background = showingOriginal ? "transparent" : background;
       if (showingOriginal) {
         textNode.style.display = "none";
         textNode.style.visibility = "hidden";
         if (badge) badge.style.display = "none";
+        if (deleteButton) deleteButton.style.display = "none";
         return;
       }
       textNode.style.display = "";
       textNode.style.visibility = "visible";
       if (badge) badge.style.display = "";
+      if (deleteButton) deleteButton.style.display = "";
+    },
+
+    appendDeleteButton(root, state, record, segment, translation, part) {
+      if (!root || !state?.reader || !record || !segment) return null;
+      if (!translation || !["cached", "translated"].includes(translation.status)
+        || !String(translation.translatedText || "").trim()) return null;
+      const doc = root.ownerDocument;
+      if (!doc?.createElement) return null;
+      const button = doc.createElement("button");
+      button.type = "button";
+      button.className = "reader-selection-replacer-delete-button";
+      button.textContent = "×";
+      button.title = "删除此段译文并恢复原文";
+      button.setAttribute("aria-label", "删除此段译文并恢复原文");
+      const left = Number(part?.rect?.[0] || 0);
+      this.style(button, {
+        position: "absolute", left: left >= 24 ? "-21px" : "2px", top: "2px",
+        zIndex: "4", width: "18px", height: "18px", padding: "0",
+        boxSizing: "border-box", border: "1px solid rgba(107, 114, 128, 0.85)",
+        borderRadius: "50%", color: "#b91c1c", background: "rgba(255, 255, 255, 0.96)",
+        font: "bold 15px/16px sans-serif", textAlign: "center",
+        pointerEvents: "auto", cursor: "pointer", userSelect: "none",
+        webkitUserSelect: "none", appearance: "none"
+      });
+      button.style.display = root.dataset.translationDisplayMode === "original" ? "none" : "";
+      const stopEvent = event => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+      };
+      button.addEventListener("mousedown", stopEvent);
+      button.addEventListener("click", event => {
+        stopEvent(event);
+        if (button.disabled) return;
+        button.disabled = true;
+        button.dataset.deleting = "true";
+        const app = global.TranslatorForZoteroApp || global.SelectionReplacerTest;
+        Promise.resolve().then(() => {
+          if (typeof app?.removeTranslationSegment !== "function") {
+            throw new Error("删除译文操作不可用");
+          }
+          return app.removeTranslationSegment(state.reader, record.recordID, segment.id);
+        }).then(removed => {
+          if (removed !== true) throw new Error("未找到可删除的译文覆盖块");
+        }).catch(error => {
+          Zotero.logError?.(error);
+          button.disabled = false;
+          delete button.dataset.deleting;
+          const message = String(error?.message || error);
+          button.title = `删除失败：${message}`;
+          app?.setReaderStatus?.(state.reader, `删除译文失败：${message}`);
+        });
+      });
+      root.append(button);
+      return button;
     },
 
     renderTranslatedTarget(state, part, target, targetIndex, partIndex, translatedText,
@@ -208,8 +266,9 @@
       const [left, top, right, bottom] = part.rect;
       const width = Math.max(1, right - left);
       const height = Math.max(1, bottom - top);
-      const accent = AUTO_TARGET_COLORS[target.kind] || PARAGRAPH_MARK_COLORS[targetIndex];
       const colors = this.pageColors(state, part.pageIndex);
+      const segment = record?.segments?.find?.(value =>
+        String(value?.id || "") === String(target.kind || "")) || null;
       const translationPending = Boolean(record?.translationPending
         && (!translation || ["failed", "skipped"].includes(translation.status)));
       const overlayKey = `auto:${record?.recordID || state.renderRecordID || ""}`
@@ -237,7 +296,7 @@
       this.style(root, {
         position: "absolute", boxSizing: "border-box", left: `${left}px`,
         top: `${top}px`, width: `${width}px`, height: `${height}px`,
-        overflow: "hidden", border: "none", background: colors.background,
+        overflow: "visible", border: "none", background: colors.background,
         pointerEvents: "none"
       });
       const textNode = doc.createElement("div");
@@ -260,7 +319,7 @@
       });
       root.append(textNode);
       layer.append(root);
-      let badge = null;
+      const badge = null;
       const renderDisplay = showingOriginal => {
         this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
         if (showingOriginal) {
@@ -329,19 +388,10 @@
           failureCountdown.message,
           translationFitted.failureReason || translation?.errorCode || "translation-failed");
       }
-      const decoration = this.translationDecoration(target.kind, displayStatus);
-      root.style.border = decoration.border;
+      root.style.border = "none";
       root.dataset.translationDisplayStatus = displayStatus;
-      if (decoration.showBadge) {
-        badge = doc.createElement("span");
-        badge.className = "reader-selection-replacer-test-auto-badge";
-        badge.textContent = decoration.badgeText;
-        this.style(badge, { position: "absolute", left: "0", top: "0", zIndex: "3",
-          padding: "0 3px", color: "#ffffff", background: accent,
-          font: "10px/14px sans-serif", whiteSpace: "nowrap", pointerEvents: "none",
-          userSelect: "none", webkitUserSelect: "none" });
-        badge.style.display = fitted.layoutMode === "original-page" ? "none" : "";
-        root.append(badge);
+      if (displayStatus === "success" && partIndex === 0) {
+        this.appendDeleteButton(root, state, record, segment, translation, part);
       }
       this.configureTranslationSelection(root, textNode,
         displayStatus === "success", showingOriginal, state, part.pageIndex);
@@ -369,10 +419,6 @@
       if (!placement) return { rendered: false, layoutMode: "diagnostic", fontSize: 0,
         lineHeight: 0, sourceRectCount: part.sourceRects.length, mergedRectCount: 1,
         failureReason: "page-local-position-invalid", node: null };
-      const selectionBlock = paragraph.matchType === "selection-block";
-      const accent = selectionBlock ? "#f59e0b"
-        : PARAGRAPH_MARK_COLORS[paragraphIndex % PARAGRAPH_MARK_COLORS.length];
-      const label = `S${displayIndex + 1}`;
       const colors = this.pageColors(state, part.pageIndex);
       const translationSucceeded = ["cached", "translated"].includes(translation?.status);
       const translatedText = translationSucceeded ? String(translatedChunk || "") : "";
@@ -409,12 +455,12 @@
         || (record?.translationPending ? "pending" : "missing"));
       root.dataset.translationError = String(translation?.errorCode || "");
       root.dataset.translationBackground = colors.background;
-      root.title = `划选翻译 ${label}：${String(paragraph.selectedText || paragraph.sourceText || "")
+      root.title = `划选翻译：${String(paragraph.selectedText || paragraph.sourceText || "")
         .replace(/\s+/gu, " ").trim().slice(0, 240)}`;
       this.style(root, {
         position: "absolute", boxSizing: "border-box",
         ...placement,
-        overflow: "hidden",
+        overflow: "visible",
         border: "none", background: colors.background,
         pointerEvents: "none"
       });
@@ -431,7 +477,7 @@
       });
       root.append(textNode);
       layer.append(root);
-      let badge = null;
+      const badge = null;
       const renderDisplay = showingOriginal => {
         this.applyTranslationDisplay(root, textNode, badge, showingOriginal, colors.background);
         if (showingOriginal) {
@@ -579,39 +625,16 @@
           failureCountdown.message,
           translationFitted.failureReason || translation?.errorCode || "translation-failed");
       }
-      if (partIndex === 0) {
-        badge = doc.createElement("span");
-        badge.className = "reader-selection-replacer-test-paragraph-badge";
-        badge.textContent = label;
-        this.style(badge, {
-          position: "absolute", left: "0", top: "0", zIndex: "3", padding: "0 2px",
-          color: "#ffffff", background: accent, font: "9px/12px sans-serif",
-          whiteSpace: "nowrap", pointerEvents: "none",
-          userSelect: "none", webkitUserSelect: "none"
-        });
-        badge.style.display = fitted.layoutMode === "original-page" ? "none" : "";
-        root.append(badge);
-      }
       root.dataset.translationDisplayStatus = displayStatus;
+      if (displayStatus === "success" && partIndex === 0) {
+        this.appendDeleteButton(root, state, record, segment, translation, part);
+      }
       this.configureTranslationSelection(root, textNode,
         displayStatus === "success", showingOriginal, state, part.pageIndex);
       const result = { ...fitted, node: root };
       root._selectionLayoutResult = { ...fitted, node: undefined };
       this.registerOverlayNode(state, root, overlayKey, overlaySignature);
       return result;
-    },
-
-    translationDecoration(kind, status) {
-      if (kind === "title") {
-        return { border: "none", showBadge: false, badgeText: "" };
-      }
-      if (kind === "abstract" && status === "success") {
-        return { border: "none", showBadge: false, badgeText: "" };
-      }
-      if (kind === "abstract") {
-        return { border: "none", showBadge: true, badgeText: "摘要状态" };
-      }
-      return { border: "none", showBadge: true, badgeText: "标题译文" };
     },
 
     renderTranslationStatus(node, kind, message, failureReason) {
@@ -657,24 +680,6 @@
           ? "rgba(37, 99, 235, 0.15)" : "rgba(249, 115, 22, 0.15)",
         pointerEvents: "none"
       });
-      if (partIndex === 0) {
-        const badge = doc.createElement("span");
-        badge.className = "reader-selection-replacer-test-auto-badge";
-        badge.textContent = label;
-        this.style(badge, {
-          position: "absolute",
-          left: "0",
-          top: "0",
-          zIndex: "3",
-          padding: "0 3px",
-          color: "#ffffff",
-          background: accent,
-          font: "10px/14px sans-serif",
-          whiteSpace: "nowrap",
-          pointerEvents: "none"
-        });
-        root.append(badge);
-      }
       layer.append(root);
       this.registerOverlayNode(state, root,
         `target:${state.renderRecordID || ""}:${target.kind}:${targetIndex}:${partIndex}`,
@@ -696,7 +701,7 @@
       root.className = "reader-selection-replacer-test-part";
       root.dataset.paragraphIndex = String(paragraphIndex);
       root.dataset.partIndex = String(partIndex);
-      root.title = `选区段落 ${paragraphIndex + 1}：${String(paragraph.sourceText || "")
+      root.title = `选区段落：${String(paragraph.sourceText || "")
         .replace(/\s+/gu, " ").trim().slice(0, 200)}`;
       this.style(root, {
         position: "absolute",
@@ -743,23 +748,6 @@
         root.append(textNode);
       }
 
-      if (partIndex === 0) {
-        const badge = doc.createElement("span");
-        badge.className = "reader-selection-replacer-test-paragraph-badge";
-        badge.textContent = `${unclassified ? "U" : "P"}${displayIndex + 1}`;
-        this.style(badge, {
-          position: "absolute",
-          left: "0",
-          top: "0",
-          zIndex: "3",
-          padding: "0 2px",
-          color: "#ffffff",
-          background: accent,
-          font: "9px/12px sans-serif",
-          pointerEvents: "none"
-        });
-        root.append(badge);
-      }
       layer.append(root);
       this.registerOverlayNode(state, root,
         `replacement:${state.renderRecordID || ""}:${paragraphIndex}:${partIndex}`,
