@@ -330,6 +330,80 @@
       }
     },
 
+    async removeTranslationSegment(reader, recordID, segmentID) {
+      if (!reader || !recordID || segmentID === undefined || segmentID === null) {
+        throw new Error("译文覆盖块信息不完整");
+      }
+      const state = SelectionReplacerOverlay.states.get(reader);
+      const record = state?.records?.get?.(String(recordID));
+      if (!record) throw new Error("译文覆盖块已不存在");
+      const targetSegmentID = String(segmentID);
+      const segment = (record.segments || []).find(value =>
+        String(value?.id || "") === targetSegmentID);
+      const translation = segment
+        ? record.translations?.get?.(segment.id) : null;
+      if (!segment || !translation
+        || !["cached", "translated"].includes(translation.status)
+        || !String(translation.translatedText || "").trim()) {
+        throw new Error("未找到可删除的译文缓存");
+      }
+      const attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
+      if (!attachment || (!attachment.key && !attachment.id)) {
+        throw new Error("未找到 PDF 附件");
+      }
+      const modelSpec = {
+        provider: String(translation.provider || ""),
+        model: String(translation.model || "")
+      };
+      if (!modelSpec.provider || !modelSpec.model) {
+        throw new Error("译文模型信息不完整");
+      }
+      await SegmentTranslationCache.remove(attachment, segment, "zh-CN", modelSpec);
+
+      const remainingSegments = (record.segments || []).filter(value =>
+        String(value?.id || "") !== targetSegmentID);
+      const remainingTranslations = new Map(
+        [...(record.translations?.entries?.() || [])].filter(([id]) =>
+          String(id) !== targetSegmentID));
+
+      if (record.mode === "diagnostic") {
+        const remainingTargets = (record.targets || []).filter(target =>
+          String(target?.kind || "") !== targetSegmentID);
+        const session = this.autoSessions.get(reader);
+        if (session) {
+          if (session.result) {
+            session.result = { ...session.result, targets: remainingTargets };
+          }
+          session.segments = remainingSegments;
+          for (const field of ["translation", "translationAttempt"]) {
+            const attempt = session[field];
+            if (!attempt) continue;
+            attempt.results = remainingTranslations;
+            attempt.diagnostics = TranslationCoordinator.diagnostics(remainingTranslations);
+          }
+        }
+        if (remainingTargets.length) {
+          SelectionReplacerOverlay.attach(reader, state.view, remainingTargets, {
+            mode: "diagnostic", recordID: record.recordID,
+            segments: remainingSegments, translations: remainingTranslations,
+            translationPending: false
+          });
+        }
+        else {
+          SelectionReplacerOverlay.removeRecord(reader, record.recordID);
+        }
+      }
+      else {
+        SelectionReplacerOverlay.removeRecord(reader, record.recordID);
+      }
+
+      this.setLatestTranslationPreview(reader,
+        this.makeTranslationPreview(remainingSegments, remainingTranslations));
+      this.setReaderStatus(reader, "已删除该段译文缓存，已恢复原文");
+      this.refreshAllPanels();
+      return true;
+    },
+
     onRenderTextSelectionPopup({ reader, doc, params, append }) {
       if (!reader || !doc || typeof append !== "function") return;
       const annotation = params?.annotation;
