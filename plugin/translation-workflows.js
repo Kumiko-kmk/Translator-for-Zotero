@@ -10,6 +10,205 @@
   } = global.TranslatorCore;
 
   const TranslatorWorkflows = {
+    logCacheError(operation, error) {
+      const message = error?.message || String(error || "unknown error");
+      Zotero.debug?.(`[${PLUGIN_ID}] translation cache ${operation} skipped: ${message}`);
+    },
+
+    getCurrentTranslationModelSpec() {
+      const provider = this.getProvider?.(this.activeProviderID)
+        || getTranslationProvider?.(this.activeProviderID);
+      return provider?.modelSpec || null;
+    },
+
+    async ensureSelectionLayoutData(view, position) {
+      const fragments = ReaderPageTextIndex.positionFragments(position);
+      const pageIndexes = [...new Set(fragments.map(fragment => Number(fragment.pageIndex)))]
+        .filter(Number.isInteger);
+      if (pageIndexes.length !== 1 || !view
+        || typeof ReaderPageTextIndex.loadIndexes !== "function") return;
+      try {
+        await ReaderPageTextIndex.loadIndexes(view, pageIndexes);
+      }
+      catch (error) {
+        Zotero.debug?.(`[${PLUGIN_ID}] selection layout index unavailable: ${
+          error?.message || error}`);
+      }
+    },
+
+    async ensureReaderHydrated(reader) {
+      if (!reader) return null;
+      const existing = this.readerHydrationPromises?.get(reader);
+      if (existing) return await existing;
+      const promise = (async () => {
+        const view = await this.waitForPDFView(reader);
+        const attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
+        if (!attachment) throw new Error("未找到 PDF 附件");
+        let identity = null;
+        try {
+          identity = await SegmentTranslationCache.ensureAttachment(attachment,
+            { refresh: true });
+        }
+        catch (error) {
+          this.logCacheError("hydration identity lookup", error);
+        }
+        if (identity?.usable) {
+          try {
+            await this.restorePersistedSelections(reader, view, attachment, identity);
+          }
+          catch (error) {
+            this.logCacheError("hydration restore", error);
+          }
+        }
+        const context = { reader, view, attachment, identity };
+        this.readerCacheContexts?.set(reader, context);
+        this.rebuildReaderTranslationPreview(reader);
+        return context;
+      })().catch(error => {
+        this.readerHydrationPromises?.delete(reader);
+        throw error;
+      });
+      this.readerHydrationPromises?.set(reader, promise);
+      return await promise;
+    },
+
+    async getReaderCacheContext(reader, options = {}) {
+      const context = await this.ensureReaderHydrated(reader);
+      if (!context || !options.refresh) return context;
+      let identity = null;
+      try {
+        identity = await SegmentTranslationCache.ensureAttachment(context.attachment,
+          { refresh: true });
+      }
+      catch (error) {
+        this.logCacheError("identity refresh", error);
+        context.identityChanged = false;
+        return context;
+      }
+      if (!identity?.usable) {
+        context.identityChanged = false;
+        return context;
+      }
+      const previousFingerprint = context.identity?.fileFingerprint;
+      const changed = previousFingerprint
+        && previousFingerprint !== identity.fileFingerprint;
+      context.identity = identity;
+      context.identityChanged = Boolean(changed);
+      if (changed) {
+        const state = SelectionReplacerOverlay.states.get(reader);
+        for (const record of [...(state?.records?.values?.() || [])]) {
+          SelectionReplacerOverlay.removeRecord(reader, record.recordID);
+        }
+        this.rebuildReaderTranslationPreview(reader);
+      }
+      return context;
+    },
+
+    async restorePersistedSelections(reader, view, attachment, identity) {
+      if (!identity?.usable) return 0;
+      let rows = [];
+      try {
+        rows = await SegmentTranslationCache.listForAttachment(attachment, "zh-CN",
+          { identity });
+      }
+      catch (error) {
+        this.logCacheError("list persisted selections", error);
+        return 0;
+      }
+      let restored = 0;
+      for (const row of rows) {
+        if (!row.recordID || !row.position || !row.sourceText) continue;
+        try {
+          await this.ensureSelectionLayoutData(view, row.position);
+          const match = ReaderSelectionBlock.create({
+            view,
+            position: row.position,
+            sourceText: row.sourceText
+          });
+          if (!match.layoutSupport?.supported) {
+            Zotero.debug?.(`[${PLUGIN_ID}] restoring selection with layout fallback ${row.recordID}: ${
+              match.layoutSupport?.reason || "layout-unknown"}`);
+          }
+          const segment = ContentSegments.fromSelectionBlock(match)[0];
+          if (!segment || segment.sourceText !== row.sourceText
+            || positionSignature(segment.position) !== row.positionSignature) continue;
+          const actualUnits = segment.metadata?.selectionUnits || [];
+          const expectedUnits = Array.isArray(row.sourceUnits) ? row.sourceUnits : [];
+          const unitsMatch = JSON.stringify(actualUnits.map(unit => ({
+            id: String(unit?.id || ""),
+            sourceText: String(unit?.sourceText || ""),
+            breakAfter: unit?.breakAfter === "paragraph" ? "paragraph" : "none"
+          }))) === JSON.stringify(expectedUnits.map(unit => ({
+            id: String(unit?.id || ""),
+            sourceText: String(unit?.sourceText || ""),
+            breakAfter: unit?.breakAfter === "paragraph" ? "paragraph" : "none"
+          })));
+          if (!unitsMatch) continue;
+          let current = null;
+          try {
+            current = await SegmentTranslationCache.get(attachment, segment, "zh-CN",
+              null, { identity });
+          }
+          catch (error) {
+            this.logCacheError("restore cache read", error);
+            continue;
+          }
+          const decoded = current?.translatedText
+            ? decodeCachedTranslation(segment, current.translatedText) : null;
+          if (!decoded?.translatedText || current.recordID !== row.recordID) continue;
+          SelectionReplacerOverlay.attach(reader, view, match, {
+            mode: "selection-translation",
+            recordID: current.recordID,
+            segments: [segment],
+            translations: new Map([[segment.id, {
+              segmentID: segment.id,
+              status: "cached",
+              translatedText: decoded.translatedText,
+              translatedUnits: decoded.translatedUnits,
+              recordID: current.recordID,
+              provider: current.provider,
+              model: current.model,
+              promptVersion: current.promptVersion,
+              errorCode: "",
+              errorMessage: ""
+            }]]),
+            translationPending: false
+          });
+          restored += 1;
+        }
+        catch (error) {
+          // A malformed position, payload, or unit list must not prevent the
+          // rest of the Reader from opening or the other selections restoring.
+          Zotero.debug?.(`[${PLUGIN_ID}] skipped persisted selection ${row.recordID}: ${
+            error?.message || error}`);
+        }
+      }
+      return restored;
+    },
+
+    rebuildReaderTranslationPreview(reader) {
+      const state = SelectionReplacerOverlay.states.get(reader);
+      if (!state?.records) {
+        this.clearLatestTranslationPreview(reader);
+        return;
+      }
+      const records = [...state.records.values()].sort((left, right) =>
+        (left.mode === "diagnostic" ? -1 : 1) - (right.mode === "diagnostic" ? -1 : 1)
+        || Number(left.sequence || 0) - Number(right.sequence || 0));
+      const segments = [];
+      const results = new Map();
+      for (const record of records) {
+        for (const segment of record.segments || []) {
+          const result = record.translations?.get?.(segment.id);
+          if (!["cached", "translated"].includes(result?.status)) continue;
+          const id = `${record.recordID}:${segment.id}`;
+          segments.push({ ...segment, id });
+          results.set(id, result);
+        }
+      }
+      this.setLatestTranslationPreview(reader, this.makeTranslationPreview(segments, results));
+    },
+
     formatAutoTargetStatus(session, kind) {
       const label = AUTO_TARGET_LABELS[kind] || kind;
       if (!session) return `${label}：未开始`;
@@ -124,10 +323,6 @@
 
     async autoMarkReader(reader, options = {}) {
       if (!reader) return null;
-      if (!this.activeProviderID) {
-        this.setReaderStatus(reader, "请先选择翻译模型");
-        return null;
-      }
       const config = typeof options === "boolean" ? { force: options } : (options || {});
       const force = Boolean(config.force);
       const targetKinds = Array.isArray(config.targetKinds) && config.targetKinds.length
@@ -142,11 +337,13 @@
         if (previous) previous.cancelled = true;
       }
       this.startingReaders.add(reader);
-      this.clearLatestTranslationPreview(reader);
       this.setReaderStatus(reader, "正在识别标题/摘要…");
       let session = null;
       try {
-        const view = await this.waitForPDFView(reader);
+        const cacheContext = await this.getReaderCacheContext(reader, { refresh: true });
+        const previousForCache = cacheContext.identityChanged ? null : previous;
+        const view = cacheContext.view;
+        const attachment = cacheContext.attachment;
         if (!SelectionReplacerOverlay.states.has(reader)) {
           SelectionReplacerOverlay.attach(reader, view, [], {
             mode: "diagnostic", recordID: "front-matter", segments: [],
@@ -155,9 +352,8 @@
         }
         const metadata = await ReaderMetadataLoader.read(reader);
         const located = await ReaderTargetLocator.locate(view, metadata);
-        const attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
         const previousRecord = SelectionReplacerOverlay.states.get(reader)?.records?.get("front-matter");
-        const oldTargets = previous?.result?.targets || previousRecord?.targets || [];
+        const oldTargets = previousForCache?.result?.targets || previousRecord?.targets || [];
         const targetMap = new Map(oldTargets.map(target => [target.kind, target]));
         for (const target of located.targets || []) targetMap.set(target.kind, target);
         const targets = [...targetMap.values()];
@@ -165,8 +361,16 @@
           ? targets.filter(target => targetKinds.has(target.kind))
           : targets;
         const segments = ContentSegments.fromTargets(requestedTargets);
-        const retainedResults = new Map(previous?.translation?.results
+        const retainedResults = new Map(previousForCache?.translation?.results
           || previousRecord?.translations || []);
+        const previousSegments = previousForCache?.segments || previousRecord?.segments || [];
+        for (const segment of segments) {
+          const oldSegment = previousSegments.find(value => value?.id === segment.id);
+          if (oldSegment && (oldSegment.sourceText !== segment.sourceText
+            || positionSignature(oldSegment.position) !== positionSignature(segment.position))) {
+            retainedResults.delete(segment.id);
+          }
+        }
         session = {
           reader, view, result: { ...located, targets }, segments, attachment,
           cancelled: false, retryKinds: targetKinds
@@ -179,7 +383,8 @@
         }
         this.setReaderStatus(reader, this.formatAutoStatusV2({ ...located, targets }));
         const translation = await TranslationCoordinator.translateSegments({
-          attachment, segments, session, bypassCache: force
+          attachment, attachmentIdentity: cacheContext.identity, segments, session,
+          modelSpec: this.getCurrentTranslationModelSpec(), bypassCache: force
         });
         if (session.cancelled) return session;
         const combinedResults = new Map(retainedResults);
@@ -194,14 +399,13 @@
         session.translation = translation;
         session.translationAttempt = translation;
         session.translation.results = combinedResults;
-        this.setLatestTranslationPreview(reader,
-          this.makeTranslationPreview(segments, combinedResults));
         if (targets.length) {
           SelectionReplacerOverlay.attach(reader, view, targets, {
             mode: "diagnostic", recordID: "front-matter", segments,
             translations: combinedResults
           });
         }
+        this.rebuildReaderTranslationPreview(reader);
         const translated = translation.diagnostics.translated + translation.diagnostics.cached;
         this.setReaderStatus(reader,
           `${this.formatAutoStatusV2({ ...located, targets })} | 译文 ${translated}/${segments.length}`);
@@ -238,17 +442,13 @@
     },
 
     async translateSelection(reader, annotation, sourceText, status, button) {
-      if (!this.activeProviderID) {
-        status.textContent = "请先选择翻译模型";
-        return;
-      }
       const position = copyPosition(annotation?.position)
         || copyPosition(reader?._internalReader?.getSelectionPosition?.());
-      const view = reader?._internalReader?._primaryView || null;
       if (!position) {
         status.textContent = "未读取到选区位置";
         return;
       }
+      const view = reader?._internalReader?._primaryView || await this.waitForPDFView(reader);
       if (!view || !view?._iframeWindow?.PDFViewerApplication?.pdfViewer) {
         status.textContent = "未找到 PDF 视图";
         return;
@@ -267,14 +467,21 @@
       const session = { reader, cancelled: false, statusElement: status,
         recordID: `selection-${++this.selectionTaskCounter}` };
       this.selectionSessions.set(reader, session);
-      this.clearLatestTranslationPreview(reader);
       try {
+        await this.ensureSelectionLayoutData(view, position);
         const match = ReaderSelectionBlock.create({ view, position, sourceText });
+        session.layoutSupport = match.layoutSupport;
+        if (!match.layoutSupport?.supported) {
+          Zotero.debug?.(`[${PLUGIN_ID}] selection layout fallback: ${
+            match.layoutSupport?.reason || "layout-unknown"}`);
+        }
+        const cacheContext = await this.getReaderCacheContext(reader, { refresh: true });
         match.segments = ContentSegments.fromSelectionBlock(match);
         session.view = view;
         session.match = match;
         session.segments = match.segments;
-        session.attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
+        session.attachment = cacheContext.attachment;
+        session.attachmentIdentity = cacheContext.identity;
         if (this.selectionSessions.get(reader) !== session || session.cancelled) return;
         if (!match.segments.length) {
           status.textContent = "未找到可翻译的划选内容";
@@ -292,10 +499,17 @@
           attachment: session.attachment,
           segments: match.segments,
           session,
+          modelSpec: this.getCurrentTranslationModelSpec(),
+          attachmentIdentity: session.attachmentIdentity,
           bypassCache: false
         });
         if (this.selectionSessions.get(reader) !== session || session.cancelled) return;
         session.translation = translation;
+        const persistedRecordID = translation.results.get(match.segments[0].id)?.recordID;
+        if (persistedRecordID && persistedRecordID !== session.recordID) {
+          SelectionReplacerOverlay.removeRecord(reader, session.recordID);
+          session.recordID = persistedRecordID;
+        }
         SelectionReplacerOverlay.attach(reader, view, match, {
           mode: "selection-translation",
           recordID: session.recordID,
@@ -303,8 +517,7 @@
           translations: translation.results,
           translationPending: false
         });
-        this.setLatestTranslationPreview(reader,
-          this.makeTranslationPreview(match.segments, translation.results));
+        this.rebuildReaderTranslationPreview(reader);
         const translated = translation.diagnostics.translated + translation.diagnostics.cached;
         status.textContent = session.geometryStatus === "geometry-invalid"
           ? "无法定位划选范围"
@@ -347,18 +560,13 @@
         || !String(translation.translatedText || "").trim()) {
         throw new Error("未找到可删除的译文缓存");
       }
-      const attachment = reader._item || await Zotero.Items.getAsync(reader.itemID);
+      const cacheContext = await this.getReaderCacheContext(reader, { refresh: true });
+      const attachment = cacheContext.attachment;
       if (!attachment || (!attachment.key && !attachment.id)) {
         throw new Error("未找到 PDF 附件");
       }
-      const modelSpec = {
-        provider: String(translation.provider || ""),
-        model: String(translation.model || "")
-      };
-      if (!modelSpec.provider || !modelSpec.model) {
-        throw new Error("译文模型信息不完整");
-      }
-      await SegmentTranslationCache.remove(attachment, segment, "zh-CN", modelSpec);
+      await SegmentTranslationCache.remove(attachment, segment, "zh-CN", null,
+        { identity: cacheContext.identity });
 
       const remainingSegments = (record.segments || []).filter(value =>
         String(value?.id || "") !== targetSegmentID);
@@ -397,8 +605,7 @@
         SelectionReplacerOverlay.removeRecord(reader, record.recordID);
       }
 
-      this.setLatestTranslationPreview(reader,
-        this.makeTranslationPreview(remainingSegments, remainingTranslations));
+      this.rebuildReaderTranslationPreview(reader);
       this.setReaderStatus(reader, "已删除该段译文缓存，已恢复原文");
       this.refreshAllPanels();
       return true;
@@ -406,12 +613,26 @@
 
     onRenderTextSelectionPopup({ reader, doc, params, append }) {
       if (!reader || !doc || typeof append !== "function") return;
+
+      // Zotero can re-render the same popup for one selection, and an old
+      // plugin instance may still receive one event during a reload. Remove
+      // only this plugin's popup containers before appending the replacement.
+      const existing = typeof doc.querySelectorAll === "function"
+        ? doc.querySelectorAll(`.${POPUP_CLASS}`) : [];
+      for (const node of existing || []) {
+        if (node?.className === POPUP_CLASS
+          || node?.dataset?.readerSelectionReplacerPopup === "true") {
+          node.remove?.();
+        }
+      }
       const annotation = params?.annotation;
       const sourceText = String(annotation?.text || "").trim();
       if (!sourceText) return;
 
       const container = doc.createElement("div");
       container.className = POPUP_CLASS;
+      container.setAttribute?.("data-reader-selection-replacer-popup", "true");
+      if (container.dataset) container.dataset.readerSelectionReplacerPopup = "true";
       container.style.display = "flex";
       container.style.flexDirection = "column";
       container.style.alignItems = "center";

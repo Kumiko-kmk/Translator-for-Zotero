@@ -129,6 +129,60 @@
     };
   }
 
+  const FLOW_METADATA_KEYS = [
+    "flowID", "flowId", "flowKey", "textFlowID", "textFlowId", "textFlow", "flow"
+  ];
+  const LINE_METADATA_KEYS = [
+    "lineID", "lineId", "sourceLineID", "sourceLineId", "lineKey", "lineIndex"
+  ];
+
+  function normalizeMetadataID(value) {
+    if (value === null || value === undefined || typeof value === "object") return null;
+    const result = String(value).trim();
+    return result && !["null", "undefined"].includes(result.toLowerCase()) ? result : null;
+  }
+
+  function metadataID(value, keys) {
+    for (const key of keys || []) {
+      const result = normalizeMetadataID(value?.[key]);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  function metadataIDs(values, keys) {
+    const result = [];
+    for (const value of values || []) {
+      const id = metadataID(value, keys);
+      if (id && !result.includes(id)) result.push(id);
+    }
+    return result;
+  }
+
+  function normalizeIDList(values) {
+    return (Array.isArray(values) ? values : [])
+      .map(normalizeMetadataID).filter(Boolean);
+  }
+
+  function uniqueNumbers(values) {
+    const result = [];
+    for (const value of values || []) {
+      const number = Number(value);
+      if (Number.isInteger(number) && !result.includes(number)) result.push(number);
+    }
+    return result;
+  }
+
+  function selectionLayoutResult(supported, reason, pageIndexes = [], flowIDs = [], lineIDs = []) {
+    return {
+      supported: Boolean(supported),
+      reason,
+      pageIndexes: uniqueNumbers(pageIndexes),
+      flowIDs: [...new Set((flowIDs || []).map(normalizeMetadataID).filter(Boolean))],
+      lineIDs: [...new Set((lineIDs || []).map(normalizeMetadataID).filter(Boolean))]
+    };
+  }
+
   function projectionFailure(pageIndex, pdfRect, failureReason, diagnostics = {}) {
     return {
       valid: false,
@@ -149,9 +203,9 @@
     const fragments = Array.isArray(position?.fragments)
       ? position.fragments.map(fragment => ({
         pageIndex: Number(fragment?.pageIndex ?? position?.pageIndex ?? 0),
-        flowID: fragment?.flowID == null ? null : String(fragment.flowID),
+        flowID: normalizeMetadataID(fragment?.flowID),
         rects: (fragment?.rects || []).map(copyRect).filter(Boolean),
-        lineIDs: [...(fragment?.lineIDs || [])].map(String),
+        lineIDs: normalizeIDList(fragment?.lineIDs),
         lineCharCounts: [...(fragment?.lineCharCounts || [])].map(Number)
       })).filter(fragment => fragment.rects.length)
       : [];
@@ -180,9 +234,9 @@
       rects: values[0].rects.map(rect => rect.slice()),
       fragments: values.map(fragment => ({
         pageIndex: fragment.pageIndex,
-        flowID: fragment.flowID == null ? null : String(fragment.flowID),
+        flowID: normalizeMetadataID(fragment.flowID),
         rects: fragment.rects.map(rect => rect.slice()),
-        lineIDs: [...(fragment.lineIDs || [])],
+        lineIDs: normalizeIDList(fragment.lineIDs),
         lineCharCounts: [...(fragment.lineCharCounts || [])]
       }))
     };
@@ -413,7 +467,9 @@
         spaceAfter: !!foreign.spaceAfter,
         ignorable: !!foreign.ignorable,
         rotation: Number(foreign.rotation || 0),
-        fontName: String(foreign.fontName || "")
+        fontName: String(foreign.fontName || ""),
+        flowID: metadataID(foreign, FLOW_METADATA_KEYS),
+        lineID: metadataID(foreign, LINE_METADATA_KEYS)
       });
     }
     diagnostics.coordinateValid = diagnostics.coordinateValid
@@ -422,6 +478,8 @@
     const page = {
       pageIndex,
       chars,
+      lines: Array.isArray(foreignPage.lines) ? foreignPage.lines : [],
+      flowID: metadataID(foreignPage, FLOW_METADATA_KEYS),
       viewBox,
       metric: {
         pageIndex,
@@ -446,6 +504,303 @@
     return pages;
   }
 
+  function collectionValue(collection, index) {
+    if (!collection) return null;
+    try {
+      if (typeof collection.get === "function") return collection.get(index) || null;
+      return collection[index] || null;
+    }
+    catch (_) {
+      return null;
+    }
+  }
+
+  function pageDataFor(view, pageIndex) {
+    const state = states.get(view);
+    const application = getApplication(view);
+    const pdfViewer = application?.pdfViewer;
+    return state?.pages?.get?.(pageIndex)
+      || collectionValue(view?._pdfPages, pageIndex)
+      || collectionValue(view?._internalReader?._pdfPages, pageIndex)
+      || collectionValue(pdfViewer?._pdfPages, pageIndex)
+      || collectionValue(pdfViewer?._pageData, pageIndex)
+      || null;
+  }
+
+  function rectangleIntersectionArea(left, right) {
+    const a = copyRect(left);
+    const b = copyRect(right);
+    if (!a || !b) return 0;
+    const width = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+    const height = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+    return width > 0 && height > 0 ? width * height : 0;
+  }
+
+  function rectangleArea(rect) {
+    const value = copyRect(rect);
+    return value ? Math.max(1, value[2] - value[0])
+      * Math.max(1, value[3] - value[1]) : 0;
+  }
+
+  function resolveLineChars(line, pageChars) {
+    const values = Array.isArray(line?.chars) ? line.chars : [];
+    return values.map(value => typeof value === "number"
+      ? pageChars?.[value] : value).filter(Boolean);
+  }
+
+  function consistentMetadataID(values, keys) {
+    let id = null;
+    for (const value of values || []) {
+      const candidate = metadataID(value, keys);
+      if (!candidate) continue;
+      if (id && id !== candidate) return { id: null, conflict: true };
+      id = candidate;
+    }
+    return { id, conflict: false };
+  }
+
+  function lineRecord(pageIndex, index, line, chars, pageFlowID = null) {
+    const charLine = consistentMetadataID(chars, LINE_METADATA_KEYS);
+    const charFlow = consistentMetadataID(chars, FLOW_METADATA_KEYS);
+    const lineID = metadataID(line, [...LINE_METADATA_KEYS, "id"])
+      || charLine.id
+      || `${pageIndex}:selection-line:${index}`;
+    const lineFlow = metadataID(line, FLOW_METADATA_KEYS);
+    const rect = copyRect(line?.rect || line?.bbox || line?.bounds)
+      || boundingRect(chars.map(char => char?.pdfRect || char?.rect));
+    return {
+      id: lineID,
+      flowID: lineFlow || charFlow.id || pageFlowID || null,
+      flowConflict: charFlow.conflict
+        || Boolean(lineFlow && charFlow.id && lineFlow !== charFlow.id),
+      lineConflict: charLine.conflict,
+      rect,
+      order: index
+    };
+  }
+
+  function boundingRect(rects) {
+    const valid = (rects || []).map(copyRect).filter(Boolean);
+    if (!valid.length) return null;
+    return [
+      Math.min(...valid.map(rect => rect[0])),
+      Math.min(...valid.map(rect => rect[1])),
+      Math.max(...valid.map(rect => rect[2])),
+      Math.max(...valid.map(rect => rect[3]))
+    ];
+  }
+
+  function pageLineRecords(page, pageIndex) {
+    const pageChars = Array.isArray(page?.chars) ? page.chars : [];
+    const rawLines = Array.isArray(page?.lines) ? page.lines : [];
+    const pageFlowID = metadataID(page, FLOW_METADATA_KEYS);
+    if (rawLines.length) {
+      const records = rawLines.map((line, index) => lineRecord(pageIndex, index, line,
+        resolveLineChars(line, pageChars), pageFlowID)).filter(record => record.rect);
+      if (records.length) return records.map((record, index) => ({ ...record, order: index }));
+    }
+    if (!pageChars.length) return [];
+
+    const groups = [];
+    let current = null;
+    const finish = () => {
+      if (current?.chars?.length) groups.push(current);
+      current = null;
+    };
+    for (const char of pageChars) {
+      if (!char) continue;
+      const lineID = metadataID(char, LINE_METADATA_KEYS);
+      const flowID = metadataID(char, FLOW_METADATA_KEYS);
+      const key = lineID ? `${flowID || ""}\u0000${lineID}` : null;
+      if (!current || (key && current.key !== key)
+        || (!key && current.explicitLineID)) {
+        finish();
+        current = { key, explicitLineID: Boolean(lineID), chars: [] };
+      }
+      current.chars.push(char);
+      if (!lineID && (char.lineBreakAfter || char.hasEOL || char.eol)) finish();
+    }
+    finish();
+    return groups.map((group, index) => lineRecord(pageIndex, index, null, group.chars,
+      pageFlowID))
+      .filter(record => record.rect);
+  }
+
+  function matchRectToLine(rect, records, usedIndexes) {
+    const selectedArea = rectangleArea(rect);
+    if (!(selectedArea > 0)) return null;
+    const candidates = [];
+    for (let index = 0; index < records.length; index++) {
+      if (usedIndexes.has(index)) continue;
+      const lineRect = records[index].rect;
+      const intersection = rectangleIntersectionArea(rect, lineRect);
+      if (!(intersection > 0)) continue;
+      const lineArea = rectangleArea(lineRect);
+      const overlap = intersection / Math.max(1, Math.min(selectedArea, lineArea));
+      const vertical = Math.max(0, Math.min(rect[3], lineRect[3])
+        - Math.max(rect[1], lineRect[1])) / Math.max(1, Math.min(
+          rect[3] - rect[1], lineRect[3] - lineRect[1]));
+      const horizontal = Math.max(0, Math.min(rect[2], lineRect[2])
+        - Math.max(rect[0], lineRect[0])) / Math.max(1, Math.min(
+          rect[2] - rect[0], lineRect[2] - lineRect[0]));
+      candidates.push({ index, score: overlap * 0.65 + vertical * 0.25 + horizontal * 0.10,
+        overlap, vertical, horizontal });
+    }
+    candidates.sort((left, right) => right.score - left.score || left.index - right.index);
+    const best = candidates[0];
+    const next = candidates[1];
+    if (!best || best.overlap < 0.20 || best.vertical < 0.35
+      || (next && next.overlap >= 0.20 && Math.abs(best.score - next.score) < 0.04)) {
+      return null;
+    }
+    return best.index;
+  }
+
+  function classifySelectionLayout({ view = null, position = null } = {}) {
+    const rawFragments = Array.isArray(position?.fragments) ? position.fragments : null;
+    const hasTopLevelPageIndex = position?.pageIndex !== null
+      && position?.pageIndex !== undefined && String(position.pageIndex).trim() !== "";
+    const fragmentsHavePageIndexes = rawFragments?.length
+      ? rawFragments.every(fragment => fragment?.pageIndex !== null
+        && fragment?.pageIndex !== undefined && String(fragment.pageIndex).trim() !== "")
+      : true;
+    const malformedRawFragment = Boolean(rawFragments?.length && rawFragments.some(fragment => {
+      if (!fragment || !Array.isArray(fragment.rects)) return true;
+      return fragment.rects.length > 0
+        && fragment.rects.map(copyRect).filter(Boolean).length !== fragment.rects.length;
+    }));
+    const hasAnyPageIndex = hasTopLevelPageIndex
+      || Boolean(rawFragments?.length && fragmentsHavePageIndexes);
+    if (!hasAnyPageIndex || malformedRawFragment) {
+      return selectionLayoutResult(false, "invalid");
+    }
+    const fragments = positionFragments(position);
+    const pageIndexes = fragments.map(fragment => fragment.pageIndex);
+    const flowIDs = metadataIDs(fragments, ["flowID"]);
+    const lineIDs = fragments.flatMap(fragment => fragment.lineIDs || []);
+    if (!fragments.length || pageIndexes.some(index => !Number.isInteger(index) || index < 0)) {
+      return selectionLayoutResult(false, "invalid", pageIndexes, flowIDs, lineIDs);
+    }
+    const uniquePageIndexes = uniqueNumbers(pageIndexes);
+    if (uniquePageIndexes.length > 1) {
+      return selectionLayoutResult(false, "cross-page", uniquePageIndexes, flowIDs, lineIDs);
+    }
+    const pageIndex = uniquePageIndexes[0];
+    const pageCount = getPageCount(view);
+    if (pageCount > 0 && pageIndex >= pageCount) {
+      return selectionLayoutResult(false, "invalid", uniquePageIndexes, flowIDs, lineIDs);
+    }
+    if (flowIDs.length > 1) {
+      return selectionLayoutResult(false, "cross-column", uniquePageIndexes, flowIDs, lineIDs);
+    }
+
+    const page = pageDataFor(view, pageIndex);
+    const records = pageLineRecords(page, pageIndex);
+    const recordByID = new Map(records.map(record => [record.id, record]));
+    const selected = [];
+    const usedRecordIndexes = new Set();
+    let hasExplicitLineIDs = false;
+    for (const fragment of fragments) {
+      const fragmentLineIDs = fragment.lineIDs || [];
+      if (fragmentLineIDs.length && fragmentLineIDs.length !== fragment.rects.length) {
+        return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes, flowIDs, lineIDs);
+      }
+      if (fragmentLineIDs.length) {
+        hasExplicitLineIDs = true;
+        for (let index = 0; index < fragment.rects.length; index++) {
+          const id = normalizeMetadataID(fragmentLineIDs[index]);
+          if (!id) return selectionLayoutResult(false, "layout-unknown",
+            uniquePageIndexes, flowIDs, lineIDs);
+          const record = records.length ? recordByID.get(id) : null;
+          if (records.length && !record) {
+            return selectionLayoutResult(false, "layout-unknown",
+              uniquePageIndexes, flowIDs, lineIDs);
+          }
+          selected.push({ id, rect: fragment.rects[index], record,
+            fragmentFlowID: fragment.flowID });
+        }
+        continue;
+      }
+      if (!records.length) {
+        return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes, flowIDs, lineIDs);
+      }
+      for (const rect of fragment.rects) {
+        const recordIndex = matchRectToLine(rect, records, usedRecordIndexes);
+        if (recordIndex === null) {
+          return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes, flowIDs, lineIDs);
+        }
+        usedRecordIndexes.add(recordIndex);
+        const record = records[recordIndex];
+        selected.push({ id: record.id, rect, record, fragmentFlowID: fragment.flowID });
+      }
+    }
+    if (!selected.length) {
+      return selectionLayoutResult(false, "invalid", uniquePageIndexes, flowIDs, lineIDs);
+    }
+
+    const selectedLineIDs = selected.map(value => value.id);
+    if (new Set(selectedLineIDs).size !== selectedLineIDs.length) {
+      return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes,
+        flowIDs, selectedLineIDs);
+    }
+    const selectedFlowIDs = [];
+    for (const value of selected) {
+      const lineFlowID = value.record?.flowConflict ? null : value.record?.flowID;
+      const fragmentFlowID = normalizeMetadataID(value.fragmentFlowID);
+      if (fragmentFlowID && lineFlowID && fragmentFlowID !== lineFlowID) {
+        return selectionLayoutResult(false, "cross-column", uniquePageIndexes,
+          [...flowIDs, lineFlowID], selectedLineIDs);
+      }
+      const flowID = fragmentFlowID || lineFlowID;
+      if (!flowID || value.record?.flowConflict || value.record?.lineConflict) {
+        return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes,
+          selectedFlowIDs, selectedLineIDs);
+      }
+      if (!selectedFlowIDs.includes(flowID)) selectedFlowIDs.push(flowID);
+    }
+    if (selectedFlowIDs.length > 1) {
+      return selectionLayoutResult(false, "cross-column", uniquePageIndexes,
+        selectedFlowIDs, selectedLineIDs);
+    }
+
+    if (records.length) {
+      const selectedIndexes = selected.map(value => value.record?.order);
+      if (selectedIndexes.some(index => !Number.isInteger(index))) {
+        return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes,
+          selectedFlowIDs, selectedLineIDs);
+      }
+      for (let index = 1; index < selectedIndexes.length; index++) {
+        if (selectedIndexes[index] <= selectedIndexes[index - 1]
+          || selectedIndexes[index] !== selectedIndexes[index - 1] + 1) {
+          return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes,
+            selectedFlowIDs, selectedLineIDs);
+        }
+      }
+      const first = selectedIndexes[0];
+      const last = selectedIndexes[selectedIndexes.length - 1];
+      for (let index = first; index <= last; index++) {
+        const record = records[index];
+        if (!record || record.flowConflict || record.lineConflict
+          || record.flowID !== selectedFlowIDs[0]) {
+          return selectionLayoutResult(false,
+            record?.flowID && record.flowID !== selectedFlowIDs[0]
+              ? "cross-column" : "layout-unknown",
+            uniquePageIndexes, selectedFlowIDs, selectedLineIDs);
+        }
+      }
+    }
+
+    // If the caller supplied line IDs and no page text index is available, the
+    // position itself is the only reliable text-flow order we have. It is
+    // still safe to accept it because flow and line metadata were explicit.
+    if (!records.length && (!hasExplicitLineIDs || !selectedFlowIDs.length)) {
+      return selectionLayoutResult(false, "layout-unknown", uniquePageIndexes,
+        selectedFlowIDs, selectedLineIDs);
+    }
+    return selectionLayoutResult(true, "supported", uniquePageIndexes,
+      selectedFlowIDs, selectedLineIDs);
+  }
+
   function selectionPageIndexes(position, pageCount) {
     return [...new Set(positionFragments(position).map(fragment => fragment.pageIndex))]
       .filter(index => index >= 0 && index < pageCount)
@@ -457,6 +812,7 @@
     loadPage: readPage,
     loadIndexes,
     selectionPageIndexes,
+    classifySelectionLayout,
     positionFragments,
     positionV2,
     hasPageViewport,

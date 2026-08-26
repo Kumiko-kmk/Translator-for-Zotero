@@ -2,7 +2,7 @@
   "use strict";
 
   const PLUGIN_ID = "reader-selection-replacer-test@local.kumiko";
-  const PLUGIN_VERSION = "2.0.0";
+  const PLUGIN_VERSION = "2.1.0";
   const POPUP_CLASS = "reader-selection-replacer-test-popup";
   const PANE_ID = "reader-selection-replacer-test-pane";
   const PANEL_LOCALE_FILE = "reader-selection-replacer-test.ftl";

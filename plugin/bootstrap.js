@@ -25,6 +25,19 @@ function loadTranslatorModules(rootURI) {
 async function startup({ rootURI }) {
   await Zotero.initializationPromise;
   await (Zotero.uiReadyPromise || Promise.resolve());
+  const previousApp = globalThis.TranslatorForZoteroApp;
+  if (previousApp?.shutdown && (previousApp.initialized
+    || previousApp.readerEventHandlers?.size
+    || previousApp.readerListenersRegistered?.size)) {
+    try {
+      // A bootstrap reload replaces the global app object. Shut down the old
+      // instance first so its bound Reader handlers cannot survive the reload.
+      previousApp.shutdown();
+    }
+    catch (error) {
+      Zotero.logError?.(error);
+    }
+  }
   loadTranslatorModules(rootURI);
   await globalThis.TranslatorForZoteroApp.init(rootURI);
 }
