@@ -321,6 +321,21 @@ function makePosition(pageIndex, rects) {
   };
 }
 
+function makeSelectionPosition(pageIndex, rects, options) {
+  const config = options || {};
+  const position = makePosition(pageIndex, rects);
+  const fragment = position.fragments[0];
+  if (config.flowID !== null && config.flowID !== false) {
+    fragment.flowID = config.flowID || "flow-0";
+  }
+  if (config.lineIDs !== null && config.lineIDs !== false) {
+    fragment.lineIDs = (config.lineIDs || fragment.rects.map(function (_, index) {
+      return String(pageIndex) + ":line:" + String(index);
+    })).map(String);
+  }
+  return position;
+}
+
 function makeSegment(kind, sourceText, extra) {
   const additional = extra || {};
   return Object.assign({
@@ -347,5 +362,6 @@ module.exports = {
   makeReaderView,
   makeLayoutPage,
   makePosition,
+  makeSelectionPosition,
   makeSegment
 };

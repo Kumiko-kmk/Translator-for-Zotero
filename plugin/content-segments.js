@@ -61,6 +61,7 @@ var ContentSegments = {
           breakAfter: unit.breakAfter === "paragraph" ? "paragraph" : "none"
         })).filter(unit => unit.id && unit.sourceText),
         selectionDistribution: match?.distribution || { pageWeights: [], blockWeights: [] },
+        layoutSupport: match?.layoutSupport || null,
         selectedText: sourceText,
         selectedPosition: position
       }

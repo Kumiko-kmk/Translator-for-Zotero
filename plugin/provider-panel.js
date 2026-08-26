@@ -782,7 +782,9 @@
       const previousID = this.activeProviderID;
       this.activeProviderID = globalThis.setActiveTranslationProviderID?.(id) || id;
       if (previousID !== this.activeProviderID) {
-        this.latestTranslationPreviews.clear();
+        for (const reader of Zotero.Reader?._readers || []) {
+          this.rebuildReaderTranslationPreview?.(reader);
+        }
         this.refreshAllPanels();
       }
       await Promise.all([...this.panelStates].map(state => {
@@ -794,7 +796,9 @@
       const providerState = this.activeProviderID
         ? this.getProviderState(this.activeProviderID) : null;
       if (provider?.credentialMode === "none" || providerState?.status === "configured") {
-        this.restartActiveReaders();
+        // A provider/model change reuses the model-independent cache. Only an
+        // explicit retry or credential repair should bypass it.
+        this.restartActiveReaders({ force: false });
       }
     },
 
@@ -977,13 +981,13 @@
       }
     },
 
-    restartActiveReaders() {
-      if (!this.activeProviderID) return;
+    restartActiveReaders(options = {}) {
+      const force = options.force !== false;
       for (const reader of Zotero.Reader?._readers || []) {
         const session = this.autoSessions.get(reader);
         if (session) session.cancelled = true;
         this.autoSessions.delete(reader);
-        this.autoMarkReader(reader, { force: true }).catch(error => Zotero.logError?.(error));
+        this.autoMarkReader(reader, { force }).catch(error => Zotero.logError?.(error));
       }
     },
 

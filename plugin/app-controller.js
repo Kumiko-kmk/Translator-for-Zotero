@@ -28,49 +28,68 @@
     selectionTaskCounter: 0,
     startingReaders: new Set(),
     readerListenersRegistered: new Set(),
+    readerEventHandlers: new Map(),
+    readerHydrationPromises: new Map(),
+    readerCacheContexts: new Map(),
+    cacheNotifierID: null,
     paneRegistrationRetryTimer: null,
     paneRegistrationRetryCount: 0,
     firstModelSelectionNoticePromise: null,
+    initPromise: null,
+    initialized: false,
 
-    async init(rootURI) {
-      this.rootURI = rootURI;
-      await (Zotero.uiReadyPromise || Promise.resolve());
-      this.localization = createPanelLocalization();
-      insertPanelLocalizationIntoMainWindows();
-      SegmentTranslationCache.init();
-      this.registerItemPane();
-      this.registerReaderListeners();
-      Promise.resolve().then(() => {
-        if (!this.activeProviderID) return;
-        for (const reader of Zotero.Reader?._readers || []) this.autoMarkReader(reader);
-      }).catch(error => Zotero.logError?.(error));
-      (Zotero.uiReadyPromise || Promise.resolve())
-        .then(async () => {
-          this.activeProviderID = globalThis.getActiveTranslationProviderID?.()
-            || this.activeProviderID;
-          if (this.activeProviderID) await this.revalidateProviderKey(this.activeProviderID);
-          const provider = this.getProvider(this.activeProviderID);
-          const providerState = this.activeProviderID
-            ? this.getProviderState(this.activeProviderID) : null;
-          if (provider?.credentialMode === "none" || providerState?.status === "configured") {
-            this.restartActiveReaders();
-          }
-          this.refreshAllPanels();
-      }).catch(error => Zotero.logError?.(error));
-      Zotero.debug?.(`[${PLUGIN_ID}] started v${PLUGIN_VERSION}`);
+    init(rootURI) {
+      if (this.initPromise) return this.initPromise;
+      this.initPromise = (async () => {
+        this.rootURI = rootURI;
+        await (Zotero.uiReadyPromise || Promise.resolve());
+        this.localization = createPanelLocalization();
+        insertPanelLocalizationIntoMainWindows();
+        await SegmentTranslationCache.init();
+        SegmentTranslationCache.startMaintenance?.();
+        this.registerCacheNotifier();
+        this.registerItemPane();
+        this.registerReaderListeners();
+        Promise.resolve().then(() => {
+          for (const reader of Zotero.Reader?._readers || []) this.autoMarkReader(reader);
+        }).catch(error => Zotero.logError?.(error));
+        (Zotero.uiReadyPromise || Promise.resolve())
+          .then(async () => {
+            this.activeProviderID = globalThis.getActiveTranslationProviderID?.()
+              || this.activeProviderID;
+            if (this.activeProviderID) await this.revalidateProviderKey(this.activeProviderID);
+            const provider = this.getProvider(this.activeProviderID);
+            const providerState = this.activeProviderID
+              ? this.getProviderState(this.activeProviderID) : null;
+            if (provider?.credentialMode === "none" || providerState?.status === "configured") {
+              this.restartActiveReaders({ force: false });
+            }
+            this.refreshAllPanels();
+          }).catch(error => Zotero.logError?.(error));
+        this.initialized = true;
+        Zotero.debug?.(`[${PLUGIN_ID}] started v${PLUGIN_VERSION}`);
+      })().catch(error => {
+        this.initPromise = null;
+        this.initialized = false;
+        throw error;
+      });
+      return this.initPromise;
     },
 
     registerReaderListeners() {
       const reader = Zotero.Reader;
       if (!reader?.registerEventListener) return false;
       const listeners = [
-        ["renderTextSelectionPopup", this.onRenderTextSelectionPopup.bind(this)],
-        ["renderToolbar", this.onRenderToolbar.bind(this)]
+        ["renderTextSelectionPopup", "onRenderTextSelectionPopup"],
+        ["renderToolbar", "onRenderToolbar"]
       ];
-      for (const [eventName, listener] of listeners) {
-        if (this.readerListenersRegistered.has(eventName)) continue;
+      for (const [eventName, methodName] of listeners) {
+        if (this.readerEventHandlers.has(eventName)) continue;
+        const listener = this[methodName]?.bind(this);
+        if (!listener) continue;
         try {
           reader.registerEventListener(eventName, listener, PLUGIN_ID);
+          this.readerEventHandlers.set(eventName, listener);
           this.readerListenersRegistered.add(eventName);
         }
         catch (error) {
@@ -79,6 +98,74 @@
         }
       }
       return this.readerListenersRegistered.size === listeners.length;
+    },
+
+    unregisterReaderListeners() {
+      const reader = Zotero.Reader;
+      const handlers = [...this.readerEventHandlers.entries()];
+      const canUnregisterByHandler = typeof reader?.unregisterEventListener === "function";
+      let fallbackRequired = !canUnregisterByHandler;
+      if (canUnregisterByHandler) {
+        for (const [eventName, handler] of handlers) {
+          try {
+            reader.unregisterEventListener(eventName, handler);
+          }
+          catch (error) {
+            Zotero.logError?.(error);
+            fallbackRequired = true;
+          }
+        }
+      }
+      // Keep the plugin-ID cleanup as a compatibility fallback for Zotero
+      // versions without the public handler-based unregister API.
+      if (fallbackRequired) {
+        try {
+          reader?._unregisterEventListenerByPluginID?.(PLUGIN_ID);
+        }
+        catch (error) {
+          Zotero.logError?.(error);
+        }
+      }
+      this.readerEventHandlers.clear();
+      this.readerListenersRegistered.clear();
+    },
+
+    registerCacheNotifier() {
+      if (this.cacheNotifierID || !Zotero.Notifier?.registerObserver) return false;
+      const observer = {
+        notify: (event, type, ids, extraData) => {
+          SegmentTranslationCache.handleNotifier(event, type, ids, extraData)
+            .catch(error => Zotero.logError?.(error));
+        }
+      };
+      try {
+        this.cacheNotifierID = Zotero.Notifier.registerObserver(observer,
+          ["item", "trash"], `${PLUGIN_ID}-translation-cache`);
+        return true;
+      }
+      catch (error) {
+        Zotero.logError?.(error);
+        this.cacheNotifierID = null;
+        return false;
+      }
+    },
+
+    unregisterCacheNotifier() {
+      if (!this.cacheNotifierID) return;
+      try {
+        Zotero.Notifier?.unregisterObserver?.(this.cacheNotifierID);
+      }
+      catch (error) {
+        Zotero.logError?.(error);
+      }
+      this.cacheNotifierID = null;
+    },
+
+    clearReaderCacheContext(reader) {
+      if (!reader) return;
+      this.readerHydrationPromises?.delete(reader);
+      this.readerCacheContexts?.delete(reader);
+      this.latestTranslationPreviews?.delete(reader);
     },
 
     onMainWindowLoad(window) {
@@ -117,7 +204,8 @@
 
     shutdown() {
       this.clearPaneRegistrationRetry();
-      Zotero.Reader._unregisterEventListenerByPluginID?.(PLUGIN_ID);
+      this.unregisterReaderListeners();
+      this.unregisterCacheNotifier();
       if (this.registeredPaneID) {
         Zotero.ItemPaneManager?.unregisterSection?.(this.registeredPaneID);
       }
@@ -130,11 +218,16 @@
       this.latestTranslationPreviews.clear();
       this.translationPreviewRevision = 0;
       this.startingReaders.clear();
+      this.readerHydrationPromises.clear();
+      this.readerCacheContexts.clear();
       this.readerListenersRegistered.clear();
+      this.readerEventHandlers.clear();
       this.readerStatus.clear();
       this.panelStates.clear();
       this.localization = null;
       this.registeredPaneID = null;
+      this.initialized = false;
+      this.initPromise = null;
       SegmentTranslationCache.close().catch(error => Zotero.logError?.(error));
       Zotero.debug?.(`[${PLUGIN_ID}] stopped`);
     },

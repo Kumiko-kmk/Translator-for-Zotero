@@ -49,39 +49,23 @@
         .sort((left, right) => left[0] - right[0])) {
         if (!projections.length) continue;
         diagnostics.pages.push(pageIndex);
-        const queues = new Map();
-        for (const projection of projections) {
-          const key = projection.pixelRect.join(",");
-          if (!queues.has(key)) queues.set(key, []);
-          queues.get(key).push(projection);
+        const rect = boundingRect(projections.map(value => value.pixelRect));
+        const unitRect = boundingRect(projections.map(value => value.unitRect));
+        if (!rect || !unitRect) {
+          diagnostics.failureReasons.push("projection-group-mismatch");
+          return { status: "geometry-invalid", parts: [], diagnostics };
         }
-        const groups = ReaderSelectionBlock.groupRects(
-          projections.map(projection => projection.pixelRect));
-        for (const group of groups) {
-          const members = [];
-          for (const pixelRect of group.rects) {
-            const queue = queues.get(pixelRect.join(","));
-            const projection = queue?.shift?.();
-            if (projection) members.push(projection);
-          }
-          const rect = boundingRect(members.map(value => value.pixelRect));
-          const unitRect = boundingRect(members.map(value => value.unitRect));
-          if (!rect || !unitRect || members.length !== group.rects.length) {
-            diagnostics.failureReasons.push("projection-group-mismatch");
-            return { status: "geometry-invalid", parts: [], diagnostics };
-          }
-          parts.push({
-            pageIndex,
-            column: group.column,
-            rect,
-            unitRect,
-            sourceRects: members.map(value => value.pixelRect.slice()),
-            sourcePdfRects: members.map(value => value.pdfRect.slice()),
-            viewportSignature: members[0].viewportSignature,
-            scale: members[0].scale,
-            sourceCharCount: 0
-          });
-        }
+        parts.push({
+          pageIndex,
+          column: "single",
+          rect,
+          unitRect,
+          sourceRects: projections.map(value => value.pixelRect.slice()),
+          sourcePdfRects: projections.map(value => value.pdfRect.slice()),
+          viewportSignature: projections[0].viewportSignature,
+          scale: projections[0].scale,
+          sourceCharCount: 0
+        });
       }
       if (!parts.length) {
         diagnostics.failureReasons.push("position-empty");

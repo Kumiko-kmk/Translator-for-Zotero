@@ -34,32 +34,19 @@
       * Math.max(1, rect[3] - rect[1] - 6) : 0;
   }
 
-  function projectedEntries(view, pageIndex, rects) {
+  function projectedEntries(view, pageIndex, rects, sourceOffset = 0) {
     return (rects || []).map((pdfRect, sourceIndex) => {
       const projection = view && global.ReaderPageTextIndex?.projectRect
         ? global.ReaderPageTextIndex.projectRect({ view, pageIndex, pdfRect }) : null;
       return {
         pageIndex,
-        sourceIndex,
+        sourceIndex: sourceOffset + sourceIndex,
         pdfRect: pdfRect.slice(),
         layoutRect: projection?.valid ? projection.pixelRect.slice() : pdfRect.slice(),
         projected: Boolean(projection?.valid),
         projectionFailure: projection && !projection.valid ? projection.failureReason : ""
       };
     });
-  }
-
-  function groupEntries(entries) {
-    const queues = new Map();
-    for (const entry of entries || []) {
-      const key = entry.layoutRect.join(",");
-      if (!queues.has(key)) queues.set(key, []);
-      queues.get(key).push(entry);
-    }
-    return groupRects((entries || []).map(entry => entry.layoutRect)).map(group => ({
-      column: group.column,
-      entries: group.rects.map(rect => queues.get(rect.join(","))?.shift()).filter(Boolean)
-    }));
   }
 
   function normalizeSourceText(sourceText) {
@@ -235,59 +222,58 @@
     };
   }
 
-  function groupRects(rects) {
-    const valid = (rects || []).map(copyRect).filter(Boolean);
-    if (!valid.length) return [];
-    if (valid.length === 1) return [{ column: "single", rects: valid }];
-    const ordered = [...valid].sort((left, right) => left[0] - right[0]
-      || left[2] - right[2] || left[1] - right[1]);
-    const bounds = boundingRect(ordered);
-    const selectedWidth = Math.max(1, bounds[2] - bounds[0]);
-    const typicalHeight = median(ordered.map(rect => Math.max(1, rect[3] - rect[1]))) || 1;
-    const minimumGap = Math.max(12, typicalHeight * 1.25, selectedWidth * 0.06);
-    let split = null;
-    for (let index = 1; index < ordered.length; index++) {
-      const left = ordered.slice(0, index);
-      const right = ordered.slice(index);
-      const leftRight = Math.max(...left.map(rect => rect[2]));
-      const rightLeft = Math.min(...right.map(rect => rect[0]));
-      const gap = rightLeft - leftRight;
-      if (gap >= minimumGap && (!split || gap > split.gap)) {
-        split = { gap, left, right };
-      }
-    }
-    if (!split) return [{ column: "single", rects: valid }];
-    return [
-      { column: "left", rects: split.left },
-      { column: "right", rects: split.right }
-    ];
-  }
-
   function create({ view = null, position, sourceText }) {
     const normalizedPosition = global.ReaderPageTextIndex.positionV2(position);
     const text = normalizeSourceText(sourceText);
+    const classify = global.ReaderPageTextIndex?.classifySelectionLayout;
+    const emptyLayout = {
+      supported: false,
+      reason: "layout-unknown",
+      pageIndexes: [],
+      flowIDs: [],
+      lineIDs: []
+    };
+    const layoutSupport = normalizedPosition && classify
+      ? classify.call(global.ReaderPageTextIndex, { view, position: normalizedPosition })
+      : emptyLayout;
     if (!normalizedPosition || !text) {
       return { mode: "selection-block", sourceText: text, position: normalizedPosition,
+        layoutSupport: normalizedPosition ? layoutSupport : {
+          ...emptyLayout,
+          reason: "invalid"
+        },
         blocks: [], units: [], distribution: { pageWeights: [], blockWeights: [] },
         diagnostics: { pageCount: 0, blockCount: 0, rawRectCount: 0 } };
     }
+    // Layout classification is diagnostic only.  A selection can be genuinely
+    // cross-page/cross-column, or Zotero can simply omit enough flow metadata
+    // to prove that it is single-column.  In both cases retain the original
+    // selection and use one fallback block per page instead of dropping it.
     const byPage = new Map();
+    let sourceOffset = 0;
     for (const fragment of normalizedPosition.fragments) {
       if (!byPage.has(fragment.pageIndex)) byPage.set(fragment.pageIndex, []);
-      byPage.get(fragment.pageIndex).push(...projectedEntries(view,
-        fragment.pageIndex, fragment.rects));
+      byPage.get(fragment.pageIndex).push(...projectedEntries(
+        view, fragment.pageIndex, fragment.rects, sourceOffset));
+      sourceOffset += fragment.rects.length;
     }
     const blocks = [];
     for (const [pageIndex, entries] of [...byPage.entries()]
       .sort((left, right) => left[0] - right[0])) {
-      let columnIndex = 0;
-      for (const group of groupEntries(entries)) {
-        const layoutRect = boundingRect(group.entries.map(entry => entry.layoutRect));
-        const id = `page-${pageIndex}-${group.column}-${columnIndex++}`;
-        blocks.push({ id, pageIndex, column: group.column,
-          rects: group.entries.map(entry => entry.pdfRect.slice()),
-          entries: group.entries, layoutRect, weight: rectArea(layoutRect) });
-      }
+      const layoutRect = boundingRect(entries.map(entry => entry.layoutRect));
+      if (!layoutRect || !entries.length) continue;
+      blocks.push({
+        id: `page-${pageIndex}-selection`,
+        pageIndex,
+        // Do not claim that a fallback block is a verified single column.
+        // The block still keeps all geometry so translation/rendering can
+        // proceed even when the classifier reports an ambiguous layout.
+        column: layoutSupport?.supported === true ? "single" : "unknown",
+        rects: entries.map(entry => entry.pdfRect.slice()),
+        entries,
+        layoutRect,
+        weight: rectArea(layoutRect)
+      });
     }
     const geometry = geometricBreakRatios(blocks);
     const structured = buildUnits(text, geometry);
@@ -306,19 +292,21 @@
       units: structured.units,
       distribution: { pageWeights, blockWeights },
       diagnostics: {
-        pageCount: byPage.size,
+        pageCount: new Set(normalizedPosition.fragments.map(fragment => fragment.pageIndex)).size,
         blockCount: blocks.length,
         rawRectCount: normalizedPosition.fragments
           .reduce((sum, fragment) => sum + fragment.rects.length, 0),
-        columnPageIndexes: [...new Set(blocks.filter(block => block.column !== "single")
-          .map(block => block.pageIndex))],
+        layoutReason: layoutSupport?.reason || "layout-unknown",
+        columnPageIndexes: [],
+        layoutFallback: layoutSupport?.supported !== true,
         geometryAvailable: geometry.geometryAvailable,
         ...structured.diagnostics
-      }
+      },
+      layoutSupport
     };
   }
 
-  global.ReaderSelectionBlock = { create, groupRects, boundingRect,
+  global.ReaderSelectionBlock = { create, boundingRect,
     _test: { copyRect, median, rectArea, snapGeometryBreak, buildUnits,
       geometricBreakRatios } };
 })(typeof globalThis !== "undefined" ? globalThis : this);

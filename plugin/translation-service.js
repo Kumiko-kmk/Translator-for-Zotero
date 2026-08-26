@@ -29,6 +29,9 @@ const SELECTION_TRANSLATION_PROMPT_VERSION = "selection-translation-v4-layout-st
 const SELECTION_CACHE_ENVELOPE_VERSION = 1;
 const TITLE_BREAK_MARKER = "<br>";
 const TRANSLATION_CACHE_FILE = "paper-assistant-segment-translations.sqlite";
+const TRANSLATION_CACHE_SCHEMA_VERSION = 2;
+const TRANSLATION_CACHE_GC_INTERVAL = 24 * 60 * 60 * 1000;
+const TRANSLATION_CACHE_UNKNOWN_FINGERPRINT = "unknown";
 const API_KEY_PROMPTED_PREF = "extensions.reader-selection-replacer.apiKeyPrompted";
 // Keep failures observable during setup and manual troubleshooting. A request
 // that cannot reach the selected provider should not occupy the pane for minutes.
@@ -425,12 +428,22 @@ function cnkiEncodeText(text) {
 }
 
 function stableHash(value) {
-  let hash = 2166136261;
-  for (const character of String(value || "")) {
-    hash ^= character.codePointAt(0);
-    hash = Math.imul(hash, 16777619);
+  // Zotero's privileged JS runtime does not expose a portable Web Crypto
+  // implementation in every supported version. Two independent 32-bit
+  // lanes provide a stable 64-bit digest and are materially safer than the
+  // old single 32-bit hash for cache identities.
+  let first = 2166136261;
+  let second = 3432918353;
+  let index = 0;
+  for (const character of String(value ?? "")) {
+    const codePoint = character.codePointAt(0);
+    first = Math.imul(first ^ codePoint, 16777619);
+    second = Math.imul(second ^ (codePoint + index), 2246822519);
+    second = (second << 13) | (second >>> 19);
+    index += 1;
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return (first >>> 0).toString(16).padStart(8, "0")
+    + (second >>> 0).toString(16).padStart(8, "0");
 }
 
 function positionSignature(position) {
@@ -532,7 +545,9 @@ function decodeCachedTranslation(segment, value) {
     }
     return normalized.translatedText ? normalized : null;
   }
-  catch (_) {
+  catch (error) {
+    Zotero.debug?.(`[reader-selection-replacer] translation cache translation JSON decode failed: ${
+      error?.message || error}`);
     return null;
   }
 }
@@ -681,6 +696,19 @@ function getQwenMTRequestOptions() {
 var SegmentTranslationCache = {
   db: null,
   readyPromise: null,
+  maintenanceTimer: null,
+  attachmentIdentities: new Map(),
+  lastGarbageCollectionAt: 0,
+
+  logCacheError(operation, error) {
+    const message = error?.message || String(error || "unknown error");
+    Zotero.debug?.(`[reader-selection-replacer] translation cache ${operation} failed: ${message}`);
+  },
+
+  async query(sql, params = []) {
+    if (!this.db?.queryAsync) return [];
+    return await this.db.queryAsync(sql, params) || [];
+  },
 
   init() {
     if (this.readyPromise) return this.readyPromise;
@@ -688,49 +716,78 @@ var SegmentTranslationCache = {
       if (!Zotero.DBConnection || !Zotero.DataDirectory?.dir) return;
       this.db = new Zotero.DBConnection(PathUtils.join(Zotero.DataDirectory.dir,
         TRANSLATION_CACHE_FILE));
-      await this.db.queryAsync(`CREATE TABLE IF NOT EXISTS segment_translations (
+
+      await this.query(`CREATE TABLE IF NOT EXISTS translation_cache_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`);
+      const versionRows = await this.query(
+        `SELECT value FROM translation_cache_meta WHERE key=?`,
+        ["schema_version"]);
+      const storedVersion = String(versionRows?.[0]?.value || "");
+      if (storedVersion !== String(TRANSLATION_CACHE_SCHEMA_VERSION)) {
+        // The old table used provider/model as part of its primary key. The
+        // selected migration policy is an intentional clean rebuild and does
+        // not touch Zotero's own item database.
+        await this.query(`DROP TABLE IF EXISTS segment_translations`);
+        await this.query(`DROP TABLE IF EXISTS translation_records`);
+        await this.query(`DROP TABLE IF EXISTS attachment_states`);
+        await this.query(`DROP TABLE IF EXISTS translation_cache_meta`);
+        await this.query(`CREATE TABLE translation_cache_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )`);
+      }
+      await this.query(`CREATE TABLE IF NOT EXISTS attachment_states (
         library_id INTEGER NOT NULL,
         attachment_key TEXT NOT NULL,
+        attachment_item_id INTEGER,
+        parent_item_id INTEGER,
+        file_fingerprint TEXT NOT NULL,
+        is_trashed INTEGER NOT NULL DEFAULT 0,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        last_checked_at INTEGER NOT NULL,
+        PRIMARY KEY (library_id, attachment_key)
+      )`);
+      await this.query(`CREATE TABLE IF NOT EXISTS translation_records (
+        record_id TEXT PRIMARY KEY,
+        library_id INTEGER NOT NULL,
+        attachment_key TEXT NOT NULL,
+        attachment_item_id INTEGER,
+        parent_item_id INTEGER,
+        file_fingerprint TEXT NOT NULL,
         segment_kind TEXT NOT NULL,
-        position_signature TEXT NOT NULL,
+        segment_id TEXT NOT NULL,
+        source_text TEXT NOT NULL,
         source_hash TEXT NOT NULL,
+        source_units_json TEXT NOT NULL,
+        position_json TEXT NOT NULL,
+        position_signature TEXT NOT NULL,
         source_language TEXT NOT NULL,
         target_language TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        model TEXT NOT NULL,
         prompt_version TEXT NOT NULL,
         translated_text TEXT NOT NULL,
+        translated_units_json TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY (library_id, attachment_key, segment_kind, position_signature,
-          source_hash, source_language, target_language, provider, model, prompt_version)
+        updated_at INTEGER NOT NULL,
+        last_used_at INTEGER NOT NULL,
+        UNIQUE (library_id, attachment_key, file_fingerprint, segment_kind,
+          position_signature, source_hash, source_language, target_language)
       )`);
+      await this.query(`CREATE INDEX IF NOT EXISTS translation_records_attachment_index
+        ON translation_records (library_id, attachment_key, file_fingerprint)`);
+      await this.query(`CREATE INDEX IF NOT EXISTS translation_records_item_index
+        ON translation_records (attachment_item_id, parent_item_id)`);
+      await this.query(`INSERT OR REPLACE INTO translation_cache_meta (key, value)
+        VALUES (?, ?)`, ["schema_version", String(TRANSLATION_CACHE_SCHEMA_VERSION)]);
     })().catch(error => {
       this.db = null;
-      Zotero.logError?.(error);
+      this.logCacheError("initialization", error);
     });
     return this.readyPromise;
-  },
-
-  key(attachment, segment, targetLanguage,
-    modelSpec = TranslationModelRegistry.deepseek) {
-    const sourceIdentity = isSelectionSegment(segment)
-      ? { sourceText: segment.sourceText, units: selectionUnits(segment).map(unit => ({
-        id: unit.id, sourceText: unit.sourceText, breakAfter: unit.breakAfter
-      })) }
-      : segment.sourceText;
-    return {
-      libraryID: Number(attachment?.libraryID || 0),
-      attachmentKey: String(attachment?.key || attachment?.id || ""),
-      segmentKind: segment.kind,
-      positionSignature: positionSignature(segment.position),
-      sourceHash: stableHash(isSelectionSegment(segment)
-        ? JSON.stringify(sourceIdentity) : sourceIdentity),
-      sourceLanguage: segment.sourceLanguage,
-      targetLanguage,
-      provider: modelSpec.provider,
-      model: modelSpec.model,
-      promptVersion: this.promptVersion(segment)
-    };
   },
 
   promptVersion(segment) {
@@ -738,51 +795,540 @@ var SegmentTranslationCache = {
       ? SELECTION_TRANSLATION_PROMPT_VERSION : TRANSLATION_PROMPT_VERSION;
   },
 
-  values(key) {
-    return [key.libraryID, key.attachmentKey, key.segmentKind, key.positionSignature,
-      key.sourceHash, key.sourceLanguage, key.targetLanguage, key.provider,
-      key.model, key.promptVersion];
+  normalizeID(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : null;
+  },
+
+  async readAttachmentValue(attachment, names) {
+    for (const name of names || []) {
+      try {
+        let value = attachment?.[name];
+        if (typeof value === "function") value = value.call(attachment);
+        value = await value;
+        if (value !== undefined && value !== null && value !== "") return value;
+      }
+      catch (_) {}
+    }
+    return null;
+  },
+
+  async getAttachmentFingerprint(attachment) {
+    const attachmentHash = await this.readAttachmentValue(attachment,
+      ["attachmentHash"]);
+    if (String(attachmentHash || "").trim()) {
+      return `hash:${String(attachmentHash).trim().toLowerCase()}`;
+    }
+
+    let filePath = await this.readAttachmentValue(attachment,
+      ["getFilePathAsync", "getFilePath"]);
+    filePath = filePath ? String(filePath) : "";
+    let stat = null;
+    try {
+      if (filePath && globalThis.IOUtils?.stat) stat = await globalThis.IOUtils.stat(filePath);
+      else if (filePath && globalThis.OS?.File?.stat) stat = await globalThis.OS.File.stat(filePath);
+    }
+    catch (_) {
+      stat = null;
+    }
+
+    const modificationTime = stat?.lastModified ?? stat?.mtime
+      ?? await this.readAttachmentValue(attachment, [
+        "attachmentModificationTime", "fileModificationTime", "modificationTime"
+      ]);
+    const size = stat?.size ?? await this.readAttachmentValue(attachment, [
+      "attachmentSize", "fileSize", "size"
+    ]);
+    const numericTime = modificationTime instanceof Date
+      ? modificationTime.getTime() : Number(modificationTime);
+    const numericSize = Number(size);
+    if (modificationTime !== null && modificationTime !== undefined
+      && size !== null && size !== undefined
+      && Number.isFinite(numericTime) && numericTime >= 0
+      && Number.isFinite(numericSize) && numericSize >= 0) {
+      return `stat:${numericSize}:${numericTime}`;
+    }
+    return null;
+  },
+
+  attachmentKey(attachment) {
+    return String(attachment?.key || attachment?.id || "");
+  },
+
+  identityKey(identity) {
+    return `${identity.libraryID}\u0000${identity.attachmentKey}`;
+  },
+
+  async ensureAttachment(attachment, options = {}) {
+    const libraryID = Number(attachment?.libraryID || 0);
+    const attachmentKey = this.attachmentKey(attachment);
+    const memoKey = `${libraryID}\u0000${attachmentKey}`;
+    if (!options.refresh && this.attachmentIdentities.has(memoKey)) {
+      return this.attachmentIdentities.get(memoKey);
+    }
+
+    await this.init();
+    const fileFingerprint = await this.getAttachmentFingerprint(attachment);
+    const identity = {
+      libraryID,
+      attachmentKey,
+      attachmentItemID: this.normalizeID(attachment?.id),
+      parentItemID: this.normalizeID(attachment?.parentID ?? attachment?.parentItemID),
+      fileFingerprint: fileFingerprint || TRANSLATION_CACHE_UNKNOWN_FINGERPRINT,
+      usable: Boolean(fileFingerprint && libraryID > 0 && attachmentKey && this.db)
+    };
+    if (!identity.usable) {
+      // Unknown file identity is deliberately session-only. Do not let an
+      // unavailable fingerprint overwrite a previously valid cache state.
+      this.attachmentIdentities.set(memoKey, identity);
+      return identity;
+    }
+
+    const previousRows = await this.query(`SELECT file_fingerprint, is_trashed,
+      first_seen_at FROM attachment_states WHERE library_id=? AND attachment_key=?`,
+    [identity.libraryID, identity.attachmentKey]);
+    const previous = previousRows?.[0] || null;
+    if (previous?.file_fingerprint
+      && String(previous.file_fingerprint) !== identity.fileFingerprint) {
+      await this.clearAttachmentRecords(identity.libraryID, identity.attachmentKey);
+    }
+    const now = Date.now();
+    await this.query(`INSERT OR REPLACE INTO attachment_states (
+      library_id, attachment_key, attachment_item_id, parent_item_id,
+      file_fingerprint, is_trashed, first_seen_at, last_seen_at, last_checked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      identity.libraryID,
+      identity.attachmentKey,
+      identity.attachmentItemID,
+      identity.parentItemID,
+      identity.fileFingerprint,
+      Number(previous?.is_trashed || 0),
+      Number(previous?.first_seen_at || now),
+      now,
+      now
+    ]);
+    this.attachmentIdentities.set(memoKey, identity);
+    return identity;
+  },
+
+  serialize(value, fallback = "") {
+    try {
+      return JSON.stringify(value ?? null);
+    }
+    catch (_) {
+      return fallback;
+    }
+  },
+
+  parseJSON(value, fallback = null, fieldName = "") {
+    const raw = String(value ?? "").trim();
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw);
+    }
+    catch (error) {
+      this.logCacheError(`JSON decode${fieldName ? ` (${fieldName})` : ""}`, error);
+      return fallback;
+    }
+  },
+
+  sourceDetails(segment) {
+    const units = isSelectionSegment(segment) ? selectionUnits(segment).map(unit => ({
+      id: unit.id, sourceText: unit.sourceText, breakAfter: unit.breakAfter
+    })) : [];
+    const sourceText = String(segment?.sourceText || "");
+    return {
+      sourceText,
+      sourceUnitsJSON: this.serialize(units, "[]"),
+      sourceHash: stableHash(JSON.stringify({ sourceText, units }))
+    };
+  },
+
+  key(attachment, segment, targetLanguage,
+    _modelSpec = null, identity = null) {
+    const source = this.sourceDetails(segment);
+    const positionJSON = this.serialize(segment?.position, "null");
+    const key = {
+      libraryID: Number(identity?.libraryID ?? attachment?.libraryID ?? 0),
+      attachmentKey: String(identity?.attachmentKey || this.attachmentKey(attachment)),
+      attachmentItemID: identity?.attachmentItemID ?? this.normalizeID(attachment?.id),
+      parentItemID: identity?.parentItemID
+        ?? this.normalizeID(attachment?.parentID ?? attachment?.parentItemID),
+      fileFingerprint: String(identity?.fileFingerprint || TRANSLATION_CACHE_UNKNOWN_FINGERPRINT),
+      segmentKind: String(segment?.kind || ""),
+      segmentID: String(segment?.id || segment?.kind || ""),
+      sourceText: source.sourceText,
+      sourceUnitsJSON: source.sourceUnitsJSON,
+      positionJSON,
+      positionSignature: positionSignature(segment?.position),
+      sourceHash: source.sourceHash,
+      sourceLanguage: String(segment?.sourceLanguage || ""),
+      targetLanguage: String(targetLanguage || ""),
+      promptVersion: this.promptVersion(segment)
+    };
+    key.recordID = `translation-${stableHash(this.serialize({
+      libraryID: key.libraryID,
+      attachmentKey: key.attachmentKey,
+      fileFingerprint: key.fileFingerprint,
+      segmentKind: key.segmentKind,
+      positionSignature: key.positionSignature,
+      sourceHash: key.sourceHash,
+      sourceLanguage: key.sourceLanguage,
+      targetLanguage: key.targetLanguage
+    }))}`;
+    return key;
+  },
+
+  readRowValue(row, names, fallback = null) {
+    for (const name of names || []) {
+      try {
+        const value = row?.[name];
+        if (value !== undefined && value !== null) return value;
+      }
+      catch (_) {
+        // Zotero database rows are column proxies. A missing or inaccessible
+        // column must not make the whole cache unreadable.
+      }
+    }
+    return fallback;
+  },
+
+  normalizeRow(row) {
+    if (!row) return null;
+    try {
+      // Do not enumerate or spread Zotero's database row proxy. In Zotero,
+      // enumeration can probe QueryInterface as if it were a DB column.
+      const value = (names, fallback = null) => this.readRowValue(row, names, fallback);
+      const sourceUnitsJSON = String(value(["source_units_json"], "") ?? "");
+      const positionJSON = String(value(["position_json"], "") ?? "");
+      const translatedUnitsJSON = String(
+        value(["translated_units_json"], "") ?? ""
+      );
+      return {
+        recordID: String(value(["record_id"], "") || ""),
+        libraryID: Number(value(["library_id"], 0) || 0),
+        attachmentKey: String(value(["attachment_key"], "") || ""),
+        attachmentItemID: this.normalizeID(
+          value(["attachment_item_id"], null)
+        ),
+        parentItemID: this.normalizeID(
+          value(["parent_item_id"], null)
+        ),
+        fileFingerprint: String(
+          value(["file_fingerprint"], "") || ""
+        ),
+        segmentKind: String(value(["segment_kind"], "") || ""),
+        segmentID: String(value(["segment_id"], "") || ""),
+        sourceText: String(value(["source_text"], "") || ""),
+        sourceHash: String(value(["source_hash"], "") || ""),
+        sourceUnitsJSON,
+        source_units_json: sourceUnitsJSON,
+        sourceUnits: this.parseJSON(sourceUnitsJSON, [], "source_units_json"),
+        positionJSON,
+        position_json: positionJSON,
+        position: this.parseJSON(positionJSON, null, "position_json"),
+        positionSignature: String(
+          value(["position_signature"], "") || ""
+        ),
+        sourceLanguage: String(value(["source_language"], "") || ""),
+        targetLanguage: String(value(["target_language"], "") || ""),
+        promptVersion: String(value(["prompt_version"], "") || ""),
+        translatedText: String(value(["translated_text"], "") || ""),
+        translatedUnitsJSON,
+        translated_units_json: translatedUnitsJSON,
+        translatedUnits: this.parseJSON(
+          translatedUnitsJSON, [], "translated_units_json"
+        ),
+        provider: String(value(["provider"], "") || ""),
+        model: String(value(["model"], "") || ""),
+        createdAt: Number(value(["created_at"], 0) || 0),
+        updatedAt: Number(value(["updated_at"], 0) || 0),
+        lastUsedAt: Number(value(["last_used_at"], 0) || 0)
+      };
+    }
+    catch (error) {
+      this.logCacheError("row normalization", error);
+      return null;
+    }
   },
 
   async get(attachment, segment, targetLanguage,
-    modelSpec = TranslationModelRegistry.deepseek) {
-    await this.init();
-    if (!this.db) return null;
-    const rows = await this.db.queryAsync(`SELECT translated_text AS translatedText
-      FROM segment_translations WHERE library_id=? AND attachment_key=? AND segment_kind=?
-      AND position_signature=? AND source_hash=? AND source_language=? AND target_language=?
-      AND provider=? AND model=? AND prompt_version=?`,
-    this.values(this.key(attachment, segment, targetLanguage, modelSpec)));
-    return rows?.[0] || null;
+    modelSpec = null, options = {}) {
+    try {
+      await this.init();
+      const identity = options.identity || await this.ensureAttachment(attachment);
+      if (!this.db || !identity?.usable) return null;
+      const key = this.key(attachment, segment, targetLanguage, modelSpec, identity);
+      const rows = await this.query(`SELECT * FROM translation_records WHERE record_id=?`,
+        [key.recordID]);
+      const row = this.normalizeRow(rows?.[0]);
+      if (!row || row.fileFingerprint !== key.fileFingerprint
+        || row.sourceHash !== key.sourceHash
+        || row.positionSignature !== key.positionSignature
+        || row.sourceText !== key.sourceText
+        || row.position_json !== key.positionJSON
+        || row.source_units_json !== key.sourceUnitsJSON
+        || row.sourceLanguage !== key.sourceLanguage
+        || row.targetLanguage !== key.targetLanguage
+        || row.promptVersion !== key.promptVersion) return null;
+      const now = Date.now();
+      await this.query(`UPDATE translation_records SET last_used_at=? WHERE record_id=?`,
+        [now, key.recordID]);
+      return row;
+    }
+    catch (error) {
+      this.logCacheError("read", error);
+      return null;
+    }
+  },
+
+  async listForAttachment(attachment, targetLanguage = "zh-CN", options = {}) {
+    try {
+      await this.init();
+      const identity = options.identity || await this.ensureAttachment(attachment);
+      if (!this.db || !identity?.usable) return [];
+      const rows = await this.query(`SELECT * FROM translation_records
+        WHERE library_id=? AND attachment_key=? AND file_fingerprint=?
+          AND target_language=? AND segment_kind IN (?, ?)
+        ORDER BY created_at ASC, record_id ASC`, [
+        identity.libraryID, identity.attachmentKey, identity.fileFingerprint,
+        targetLanguage, "custom", "unclassified"
+      ]);
+      return (rows || []).map(row => {
+        try {
+          return this.normalizeRow(row);
+        }
+        catch (error) {
+          this.logCacheError("row normalization", error);
+          return null;
+        }
+      }).filter(row => row
+        && row.promptVersion === this.promptVersion({ kind: row.segmentKind })
+        && row.sourceText && row.position && row.translatedText);
+    }
+    catch (error) {
+      this.logCacheError("list", error);
+      return [];
+    }
   },
 
   async remove(attachment, segment, targetLanguage,
-    modelSpec = TranslationModelRegistry.deepseek) {
+    modelSpec = null, options = {}) {
     await this.init();
     if (!this.db) throw new Error("翻译缓存数据库不可用");
-    await this.db.queryAsync(`DELETE FROM segment_translations
-      WHERE library_id=? AND attachment_key=? AND segment_kind=?
-      AND position_signature=? AND source_hash=? AND source_language=?
-      AND target_language=? AND provider=? AND model=? AND prompt_version=?`,
-    this.values(this.key(attachment, segment, targetLanguage, modelSpec)));
+    const identity = options.identity || await this.ensureAttachment(attachment);
+    if (!identity?.usable) return false;
+    const key = this.key(attachment, segment, targetLanguage, modelSpec, identity);
+    await this.query(`DELETE FROM translation_records WHERE record_id=?`, [key.recordID]);
+    return true;
   },
 
   async put(attachment, segment, targetLanguage, translatedText,
-    modelSpec = TranslationModelRegistry.deepseek) {
+    modelSpec = null, options = {}) {
+    try {
+      await this.init();
+      if (!this.db || !String(translatedText || "").trim()) return null;
+      const identity = options.identity || await this.ensureAttachment(attachment);
+      if (!identity?.usable) return null;
+      const key = this.key(attachment, segment, targetLanguage, modelSpec, identity);
+      const encodedText = String(translatedText).trim();
+      const decoded = decodeCachedTranslation(segment, encodedText);
+      if (!decoded?.translatedText) return null;
+      const now = Date.now();
+      const existing = await this.query(
+        `SELECT created_at FROM translation_records WHERE record_id=?`, [key.recordID]);
+      if (["title", "abstract"].includes(key.segmentKind)) {
+        await this.query(`DELETE FROM translation_records WHERE library_id=?
+          AND attachment_key=? AND file_fingerprint=? AND segment_kind=?
+          AND source_language=? AND target_language=? AND record_id<>?`, [
+          key.libraryID, key.attachmentKey, key.fileFingerprint, key.segmentKind,
+          key.sourceLanguage, key.targetLanguage, key.recordID
+        ]);
+      }
+      await this.query(`INSERT OR REPLACE INTO translation_records (
+        record_id, library_id, attachment_key, attachment_item_id, parent_item_id,
+        file_fingerprint, segment_kind, segment_id, source_text, source_hash,
+        source_units_json, position_json, position_signature, source_language,
+        target_language, prompt_version, translated_text, translated_units_json,
+        provider, model, created_at, updated_at, last_used_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+        key.recordID,
+        key.libraryID,
+        key.attachmentKey,
+        key.attachmentItemID,
+        key.parentItemID,
+        key.fileFingerprint,
+        key.segmentKind,
+        key.segmentID,
+        key.sourceText,
+        key.sourceHash,
+        key.sourceUnitsJSON,
+        key.positionJSON,
+        key.positionSignature,
+        key.sourceLanguage,
+        key.targetLanguage,
+        key.promptVersion,
+        encodedText,
+        this.serialize(decoded.translatedUnits || [], "[]"),
+        String(modelSpec?.provider || ""),
+        String(modelSpec?.model || ""),
+        Number(existing?.[0]?.created_at || now),
+        now,
+        now
+      ]);
+      return { recordID: key.recordID, provider: String(modelSpec?.provider || ""),
+        model: String(modelSpec?.model || "") };
+    }
+    catch (error) {
+      this.logCacheError("write", error);
+      return null;
+    }
+  },
+
+  async clearAttachmentRecords(libraryID, attachmentKey) {
+    if (!this.db) return;
+    await this.query(`DELETE FROM translation_records
+      WHERE library_id=? AND attachment_key=?`, [libraryID, attachmentKey]);
+  },
+
+  async purgeByIDs(ids) {
+    const values = [...new Set((ids || []).map(value => this.normalizeID(value)).filter(Boolean))];
+    if (!this.db || !values.length) return 0;
+    for (const [memoKey, identity] of this.attachmentIdentities) {
+      if (values.includes(identity?.attachmentItemID)
+        || values.includes(identity?.parentItemID)) this.attachmentIdentities.delete(memoKey);
+    }
+    const placeholders = values.map(() => "?").join(", ");
+    await this.query(`DELETE FROM translation_records WHERE attachment_item_id IN (${placeholders})
+      OR parent_item_id IN (${placeholders})`, [...values, ...values]);
+    await this.query(`DELETE FROM attachment_states WHERE attachment_item_id IN (${placeholders})
+      OR parent_item_id IN (${placeholders})`, [...values, ...values]);
+    return values.length;
+  },
+
+  async setTrashedByIDs(ids, trashed) {
+    const values = [...new Set((ids || []).map(value => this.normalizeID(value)).filter(Boolean))];
+    if (!this.db || !values.length) return 0;
+    const placeholders = values.map(() => "?").join(", ");
+    await this.query(`UPDATE attachment_states SET is_trashed=?, last_seen_at=?
+      WHERE attachment_item_id IN (${placeholders}) OR parent_item_id IN (${placeholders})`,
+    [trashed ? 1 : 0, Date.now(), ...values, ...values]);
+    return values.length;
+  },
+
+  async handleNotifier(event, type, ids, extraData = null) {
     await this.init();
-    if (!this.db || !String(translatedText || "").trim()) return;
-    const key = this.key(attachment, segment, targetLanguage, modelSpec);
-    await this.db.queryAsync(`INSERT OR REPLACE INTO segment_translations (
-      library_id, attachment_key, segment_kind, position_signature, source_hash,
-      source_language, target_language, provider, model, prompt_version,
-      translated_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [...this.values(key), translatedText.trim(), Date.now()]);
+    if (!this.db) return;
+    const values = Array.isArray(ids) ? ids : (ids == null ? [] : [ids]);
+    const normalizedEvent = String(event || "").toLowerCase();
+    const normalizedType = String(type || "").toLowerCase();
+    if (normalizedEvent === "delete") {
+      await this.purgeByIDs(values);
+      return;
+    }
+    if (normalizedEvent === "trash"
+      || (normalizedType === "trash" && ["add", "modify"].includes(normalizedEvent))) {
+      await this.setTrashedByIDs(values, true);
+      return;
+    }
+    if (normalizedEvent === "untrash"
+      || (normalizedType === "trash" && normalizedEvent === "remove")) {
+      await this.setTrashedByIDs(values, false);
+      return;
+    }
+    if (normalizedEvent === "modify" && extraData && typeof extraData === "object") {
+      const deleted = Object.values(extraData).some(value => {
+        const candidate = value?.deleted ?? value?.fields?.deleted;
+        return candidate?.newValue === true || candidate === true;
+      });
+      const restored = Object.values(extraData).some(value => {
+        const candidate = value?.deleted ?? value?.fields?.deleted;
+        return candidate?.newValue === false || candidate === false;
+      });
+      if (deleted) await this.setTrashedByIDs(values, true);
+      else if (restored) await this.setTrashedByIDs(values, false);
+    }
+    // Collection membership, sorting, moves, and parent changes do not alter
+    // the attachment identity. The next Reader open still refreshes the file
+    // fingerprint, which is the only supported invalidation signal here.
+  },
+
+  async runGarbageCollection(options = {}) {
+    await this.init();
+    if (!this.db) return 0;
+    const canResolveItems = typeof Zotero.Items?.getAsync === "function"
+      || typeof Zotero.Items?.get === "function";
+    if (!canResolveItems) return 0;
+    const rows = await this.query(`SELECT library_id, attachment_key,
+      attachment_item_id, parent_item_id FROM attachment_states`);
+    let removed = 0;
+    for (const row of rows) {
+      const itemID = this.normalizeID(row.attachment_item_id);
+      if (!itemID) continue;
+      let item = null;
+      let lookupFailed = false;
+      try {
+        item = Zotero.Items.getAsync
+          ? await Zotero.Items.getAsync(itemID) : Zotero.Items.get(itemID);
+      }
+      catch (_) {
+        lookupFailed = true;
+      }
+      if (lookupFailed) continue;
+      if (!item) {
+        await this.clearAttachmentRecords(Number(row.library_id || 0),
+          String(row.attachment_key || ""));
+        await this.query(`DELETE FROM attachment_states WHERE library_id=? AND attachment_key=?`,
+          [Number(row.library_id || 0), String(row.attachment_key || "")]);
+        this.attachmentIdentities.delete(`${Number(row.library_id || 0)}\u0000${
+          String(row.attachment_key || "")}`);
+        removed += 1;
+      }
+      else {
+        await this.query(`UPDATE attachment_states SET last_checked_at=?, last_seen_at=?
+          WHERE library_id=? AND attachment_key=?`, [Date.now(), Date.now(),
+          Number(row.library_id || 0), String(row.attachment_key || "")]);
+      }
+    }
+    await this.query(`DELETE FROM translation_records WHERE NOT EXISTS (
+      SELECT 1 FROM attachment_states states
+      WHERE states.library_id=translation_records.library_id
+        AND states.attachment_key=translation_records.attachment_key
+    )`);
+    this.lastGarbageCollectionAt = Date.now();
+    await this.query(`INSERT OR REPLACE INTO translation_cache_meta (key, value)
+      VALUES (?, ?)`, ["last_gc_at", String(this.lastGarbageCollectionAt)]);
+    return removed;
+  },
+
+  async maybeGarbageCollect(options = {}) {
+    await this.init();
+    if (!this.db) return 0;
+    if (!options.force && Date.now() - this.lastGarbageCollectionAt
+      < TRANSLATION_CACHE_GC_INTERVAL) return 0;
+    return await this.runGarbageCollection(options);
+  },
+
+  startMaintenance() {
+    if (this.maintenanceTimer !== null) return;
+    this.maybeGarbageCollect({ force: true }).catch(error => Zotero.logError?.(error));
+    this.maintenanceTimer = setInterval(() => {
+      this.maybeGarbageCollect().catch(error => Zotero.logError?.(error));
+    }, TRANSLATION_CACHE_GC_INTERVAL);
+  },
+
+  stopMaintenance() {
+    if (this.maintenanceTimer !== null) clearInterval(this.maintenanceTimer);
+    this.maintenanceTimer = null;
   },
 
   async close() {
-    if (this.db) await this.db.closeDatabase();
+    this.stopMaintenance();
+    if (this.db) await this.db.closeDatabase?.();
     this.db = null;
     this.readyPromise = null;
+    this.attachmentIdentities.clear();
+    this.lastGarbageCollectionAt = 0;
   }
 };
 
@@ -1475,12 +2021,13 @@ function getTranslationProvider(providerID = getActiveTranslationProviderID()) {
 
 var TranslationCoordinator = {
   result(segment, status, translatedText = "", error = null,
-    modelSpec = TranslationModelRegistry.deepseek, translatedUnits = []) {
+    modelSpec = TranslationModelRegistry.deepseek, translatedUnits = [], recordID = "") {
     return {
       segmentID: segment.id,
       status,
       translatedText,
       translatedUnits,
+      recordID: String(recordID || ""),
       provider: modelSpec.provider,
       model: modelSpec.model,
       promptVersion: SegmentTranslationCache.promptVersion(segment),
@@ -1492,21 +2039,29 @@ var TranslationCoordinator = {
   async translateSegments({ attachment, segments, sourceLanguage = "en",
     targetLanguage = "zh-CN", session = {}, bypassCache = false,
     modelSpec = null, credentials = null, translationClient = null,
-    requestOptions = null }) {
-    const provider = getTranslationProvider(modelSpec?.provider);
-    if (!provider) {
-      const error = Object.assign(new Error("未选择翻译模型"), { code: "no-provider" });
-      const results = new Map((segments || []).map(segment => [segment.id,
-        this.result(segment, "skipped", "", error, NO_PROVIDER_MODEL_SPEC)]));
-      return { results, diagnostics: this.diagnostics(results) };
-    }
-    modelSpec = modelSpec || provider.modelSpec;
-    credentials = credentials || provider.credentials;
-    translationClient = translationClient || provider.translationClient;
-    requestOptions = requestOptions || provider.requestOptions();
+    requestOptions = null, attachmentIdentity = null }) {
+    const provider = getTranslationProvider(modelSpec?.provider
+      || getActiveTranslationProviderID());
+    modelSpec = modelSpec || provider?.modelSpec || NO_PROVIDER_MODEL_SPEC;
     const results = new Map();
-    const eligible = [];
+    const candidates = [];
     for (const segment of segments || []) {
+      candidates.push(segment);
+    }
+    if (!candidates.length) return { results, diagnostics: this.diagnostics(results) };
+    let identity = attachmentIdentity || null;
+    if (!identity) {
+      try {
+        identity = await SegmentTranslationCache.ensureAttachment(
+          attachment, { refresh: true });
+      }
+      catch (error) {
+        SegmentTranslationCache.logCacheError("identity lookup", error);
+        identity = null;
+      }
+    }
+    const eligible = [];
+    for (const segment of candidates) {
       const frontMatter = ["title", "abstract"].includes(segment.kind);
       const selection = ["custom", "unclassified"].includes(segment.kind);
       const eligibleKind = frontMatter || selection;
@@ -1516,16 +2071,39 @@ var TranslationCoordinator = {
         results.set(segment.id, this.result(segment, "skipped", "", null, modelSpec));
         continue;
       }
-      const cached = bypassCache ? null
-        : await SegmentTranslationCache.get(attachment, segment, targetLanguage, modelSpec);
+      let cached = null;
+      if (!bypassCache && identity?.usable) {
+        try {
+          cached = await SegmentTranslationCache.get(
+            attachment, segment, targetLanguage, modelSpec, { identity }
+          );
+        }
+        catch (error) {
+          SegmentTranslationCache.logCacheError("read", error);
+        }
+      }
       const decoded = cached?.translatedText
         ? decodeCachedTranslation(segment, cached.translatedText) : null;
-      if (decoded?.translatedText) results.set(segment.id,
-        this.result(segment, "cached", decoded.translatedText, null, modelSpec,
-          decoded.translatedUnits));
+      if (decoded?.translatedText) {
+        const cachedModelSpec = {
+          provider: cached.provider || modelSpec.provider,
+          model: cached.model || modelSpec.model
+        };
+        results.set(segment.id, this.result(segment, "cached", decoded.translatedText,
+          null, cachedModelSpec, decoded.translatedUnits, cached.recordID));
+      }
       else eligible.push(segment);
     }
     if (!eligible.length) return { results, diagnostics: this.diagnostics(results) };
+    if (!provider) {
+      const error = Object.assign(new Error("未选择翻译模型"), { code: "no-provider" });
+      for (const segment of eligible) results.set(segment.id,
+        this.result(segment, "skipped", "", error, NO_PROVIDER_MODEL_SPEC));
+      return { results, diagnostics: this.diagnostics(results) };
+    }
+    credentials = credentials || provider.credentials;
+    translationClient = translationClient || provider.translationClient;
+    requestOptions = requestOptions || provider.requestOptions();
     const apiKey = credentials?.getKey ? await credentials.getKey() : "";
     if (provider.credentialMode !== "none" && !apiKey) {
       const providerLabel = modelSpec.label || modelSpec.provider;
@@ -1542,10 +2120,19 @@ var TranslationCoordinator = {
         if (!value.translatedText) {
           throw Object.assign(new Error("翻译服务返回空译文"), { code: "empty-translation" });
         }
-        await SegmentTranslationCache.put(attachment, segment, targetLanguage,
-          encodeCachedTranslation(segment, value), modelSpec);
+        let cachedRecord = null;
+        if (identity?.usable) {
+          try {
+            cachedRecord = await SegmentTranslationCache.put(attachment, segment,
+              targetLanguage, encodeCachedTranslation(segment, value), modelSpec,
+              { identity });
+          }
+          catch (error) {
+            SegmentTranslationCache.logCacheError("write", error);
+          }
+        }
         results.set(segment.id, this.result(segment, "translated", value.translatedText,
-          null, modelSpec, value.translatedUnits));
+          null, modelSpec, value.translatedUnits, cachedRecord?.recordID));
       }
       catch (error) {
         results.set(segment.id, this.result(segment, "failed", "", error, modelSpec));

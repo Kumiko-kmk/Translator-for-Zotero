@@ -48,6 +48,7 @@
             SelectionReplacerTest.autoSessions?.delete(state.reader);
             SelectionReplacerTest.selectionSessions?.delete(state.reader);
             SelectionReplacerTest.readerStatus?.delete(state.reader);
+            SelectionReplacerTest.clearReaderCacheContext?.(state.reader);
             SelectionReplacerTest.refreshAllPanels?.();
             return;
           }
