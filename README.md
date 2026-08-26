@@ -6,10 +6,10 @@
 
 在 Zotero 内置 PDF Reader 中翻译论文标题、摘要和用户选中的正文，并直接阅读、选择、复制中文译文。📝✨
 
-> 🚀 **当前版本**：`2.0.0`<br>
+> 🚀 **当前版本**：`2.1.0`<br>
 > 🧩 **支持范围**：Zotero `9.x` · 带可复制文字层的 PDF · 简体中文 `zh-CN`<br>
 > 🛠️ **项目形态**：无 npm 依赖的 Zotero Bootstrap 插件，源码直接由 Zotero 加载<br>
-> 🚧 **本地审阅分支**：包含尚未发布的首次使用提示、单段缓存删除和文档更新
+> 💾 **缓存策略**：翻译结果持久化到本地 SQLite，重新打开相同附件时自动恢复
 
 [📦 下载安装包](https://github.com/Kumiko-kmk/Translator-for-Zotero/releases/latest) · [🛠️ 开发与构建](docs/DEVELOPMENT.md) · [🗒️ 版本记录](CHANGELOG.md) · [🐞 提交问题](https://github.com/Kumiko-kmk/Translator-for-Zotero/issues)
 
@@ -29,8 +29,9 @@ Translator for Zotero 面向需要阅读英文论文的 Zotero 用户。它不�
 | 🖱️ 译文选择与复制 | 成功译文保持可选择、可复制，页面按钮不会混入复制文本 |
 | 🔄 原文/译文切换 | 页面顶部和底部都可以切换当前页的显示状态 |
 | 🗑️ 单段缓存删除 | 删除成功译文的缓存和覆盖块，并恢复对应原文 |
+| 💾 持久化翻译缓存 | 重新打开相同附件时恢复已保存译文，避免重复请求 Provider |
 | ⚡ 轻量渲染 | 只保留当前页及前后各一页的覆盖层，坐标和排版结果可复用 |
-| 🌐 多 Provider | 支持 6 个 Provider，各自隔离模型、凭据、错误状态和缓存 |
+| 🌐 多 Provider | 支持 6 个 Provider；模型、凭据和错误状态相互隔离，翻译记录按内容复用 |
 | 🔐 本地安全存储 | API Key 进入 Zotero/Firefox Login Manager，翻译缓存进入本地 SQLite |
 
 ## 📦 安装
@@ -78,7 +79,7 @@ Translator for Zotero 面向需要阅读英文论文的 Zotero 用户。它不�
 - Qwen、DeepSeek、Gemini 的 Key 由 Zotero/Firefox Login Manager 管理，不写入源码、日志、截图或 Git 历史。
 - Bing、Tencent Transmart、CNKI 不显示 Key 配置区，但不代表它们提供稳定的官方开发者 API。
 - 未选择模型时，当前 Provider ID 为空，不发起翻译请求，也不写入翻译缓存。
-- 切换 Provider 只影响后续请求，不会自动修改已经显示的译文，也不会跨 Provider 复用缓存。
+- 切换 Provider 只影响后续未命中的请求；相同附件、位置和源文身份的成功译文可以跨 Provider 复用。
 - Provider 失败后不会静默切换其他服务，请检查网络、Key、额度和服务状态后手动重试。
 
 ## 📝 使用方法
@@ -113,7 +114,7 @@ Translator for Zotero 面向需要阅读英文论文的 Zotero 用户。它不�
 
 删除按钮只对状态为 `cached` 或 `translated` 且译文非空的覆盖块显示。点击后会：
 
-1. 从 SQLite 删除包含附件、位置、源文哈希、Provider、模型和提示词版本的缓存记录；
+1. 从 SQLite 删除对应附件、位置、源文身份和提示词版本的缓存记录；
 2. 从当前 Reader 的覆盖记录移除该 Segment；
 3. 恢复原文显示并刷新预览和状态栏。
 
@@ -212,8 +213,8 @@ flowchart TD
 - 📤 只向当前 Provider 发送需要翻译的标题、摘要或用户选区文本，不上传整个 PDF。
 - 📝 不修改原始 PDF，不把译文写回附件文件。
 - 🔑 API Key 通过 Zotero/Firefox Login Manager 保存；请勿写入 README、Issue、截图、日志或测试数据。
-- 🗄️ 成功译文缓存在 Zotero 数据目录的 SQLite 中，缓存键隔离附件、Segment、源文哈希、源/目标语言、Provider、模型和提示词版本。
-- 🔄 Provider 切换不会复用其他 Provider 的缓存；删除单段译文只删除对应缓存和当前覆盖块。
+- 🗄️ 成功译文缓存在 Zotero 数据目录的 SQLite 中，缓存键隔离附件、Segment、文件指纹、位置、源文哈希、源/目标语言和提示词版本。
+- 🔄 翻译记录不按 Provider/模型拆分；内容身份相同时可复用已有结果，删除单段译文只删除对应缓存和当前覆盖块。
 - ⚠️ Bing、Tencent Transmart、CNKI 使用网页或内部接口，可能受到地区网络、验证码、限流和接口变更影响。
 - 💰 API 价格、地域、额度、隐私政策和速率限制以服务商最新政策为准。
 
