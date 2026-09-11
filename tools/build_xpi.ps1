@@ -43,6 +43,7 @@ $packageFiles = @(
     "front-matter-extractor.js",
     "content-segments.js",
     "translation-service.js",
+    "provider-runtime-patches.js",
     "reader-target-locator.js",
     "overlay-layout.js",
     "overlay-renderer.js",
@@ -148,3 +149,4 @@ $hash = Get-FileHash -LiteralPath $outputPath -Algorithm SHA256
 Write-Output "XPI: $($result.FullName)"
 Write-Output "Size: $($result.Length) bytes"
 Write-Output "SHA256: $($hash.Hash)"
+
