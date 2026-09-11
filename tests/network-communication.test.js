@@ -120,6 +120,12 @@ test("DeepSeek posts structured JSON and validates the mocked provider reply", a
   const requests = [];
   context.setHTTP(async function (method, endpoint, options) {
     requests.push({ method, endpoint, options });
+    if (method === "GET") {
+      return {
+        status: 200,
+        response: { data: [{ id: "deepseek-chat" }] }
+      };
+    }
     return {
       status: 200,
       response: {
@@ -139,15 +145,52 @@ test("DeepSeek posts structured JSON and validates the mocked provider reply", a
   );
 
   assert.equal(result.get("title"), "可翻译标题");
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].method, "POST");
-  assert.match(requests[0].endpoint, /deepseek/);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].method, "GET");
+  assert.match(requests[0].endpoint, /api\.deepseek\.com\/models/);
   assert.doesNotMatch(requests[0].endpoint, /deepseek-secret/);
-  assert.equal(requests[0].options.headers.Authorization, "Bearer deepseek-secret");
-  const payload = JSON.parse(requests[0].options.body);
-  assert.equal(payload.model, "deepseek-v4-flash");
+  assert.equal(requests[1].method, "POST");
+  assert.match(requests[1].endpoint, /deepseek/);
+  assert.doesNotMatch(requests[1].endpoint, /deepseek-secret/);
+  assert.equal(requests[1].options.headers.Authorization, "Bearer deepseek-secret");
+  const payload = JSON.parse(requests[1].options.body);
+  assert.equal(payload.model, "deepseek-chat");
   assert.equal(payload.response_format.type, "json_object");
   assert.equal(JSON.parse(payload.messages[1].content).segments[0].id, "title");
+});
+
+test("Qwen exposes the provider error code, message, and request ID", async function () {
+  const context = loadTranslationContext();
+  const segment = makeSegment("title", "A title to translate", { id: "title" });
+  context.setHTTP(async function () {
+    return {
+      status: 400,
+      response: {
+        code: "InvalidParameter",
+        message: "translation_options.target_lang is invalid",
+        request_id: "qwen-request-123"
+      }
+    };
+  });
+
+  await assert.rejects(
+    context.QwenMTPlusTranslationClient.request(
+      "qwen-secret",
+      [segment],
+      { cancelled: false },
+      { retryDelays: [] }
+    ),
+    function (error) {
+      assert.equal(error.status, 400);
+      assert.equal(error.code, "InvalidParameter");
+      assert.equal(error.providerCode, "InvalidParameter");
+      assert.equal(error.requestID, "qwen-request-123");
+      assert.match(error.message, /InvalidParameter/);
+      assert.match(error.message, /target_lang is invalid/);
+      assert.match(error.message, /qwen-request-123/);
+      return true;
+    }
+  );
 });
 
 test("Gemini builds the endpoint and extracts non-thought response parts", async function () {

@@ -6,7 +6,7 @@
 
 在 Zotero 内置 PDF Reader 中翻译论文标题、摘要和用户选中的正文，并直接阅读、选择、复制中文译文。📝✨
 
-> 🚀 **当前版本**：`2.1.0`<br>
+> 🚀 **当前版本**：`2.1.1`<br>
 > 🧩 **支持范围**：Zotero `9.x` · 带可复制文字层的 PDF · 简体中文 `zh-CN`<br>
 > 🛠️ **项目形态**：无 npm 依赖的 Zotero Bootstrap 插件，源码直接由 Zotero 加载<br>
 > 💾 **缓存策略**：翻译结果持久化到本地 SQLite，重新打开相同附件时自动恢复
@@ -33,6 +33,20 @@ Translator for Zotero 面向需要阅读英文论文的 Zotero 用户。它不�
 | ⚡ 轻量渲染 | 只保留当前页及前后各一页的覆盖层，坐标和排版结果可复用 |
 | 🌐 多 Provider | 支持 6 个 Provider；模型、凭据和错误状态相互隔离，翻译记录按内容复用 |
 | 🔐 本地安全存储 | API Key 进入 Zotero/Firefox Login Manager，翻译缓存进入本地 SQLite |
+
+## 🖼️ 使用效果
+
+下面的截图展示了插件在 Zotero PDF Reader 中的两种主要使用方式：标题与摘要自动翻译，以及选区翻译与 Provider 切换。📖✨
+
+<p align="center">
+  <img src="docs/images/reader-auto-translation.jpg" alt="Zotero Reader 标题与摘要自动翻译" width="960">
+</p>
+<p align="center"><em>📰 标题、摘要自动定位并翻译，译文直接覆盖在原版面上</em></p>
+
+<p align="center">
+  <img src="docs/images/reader-selection-translation.jpg" alt="Zotero Reader 选区翻译与 Provider 面板" width="960">
+</p>
+<p align="center"><em>✂️ 选中正文后翻译，并在侧栏切换 Qwen、DeepSeek、Gemini 等 Provider</em></p>
 
 ## 📦 安装
 

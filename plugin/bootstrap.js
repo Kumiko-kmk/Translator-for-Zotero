@@ -7,6 +7,7 @@ const TRANSLATOR_MODULES = Object.freeze([
   "front-matter-extractor.js",
   "content-segments.js",
   "translation-service.js",
+  "provider-runtime-patches.js",
   "reader-target-locator.js",
   "overlay-layout.js",
   "overlay-renderer.js",

@@ -121,7 +121,8 @@ function loadTranslationContext() {
   return loadModules([
     "core.js",
     "content-segments.js",
-    "translation-service.js"
+    "translation-service.js",
+    "provider-runtime-patches.js"
   ]);
 }
 
@@ -131,7 +132,8 @@ function loadSelectionTranslationContext() {
     "page-text-index.js",
     "selection-block.js",
     "content-segments.js",
-    "translation-service.js"
+    "translation-service.js",
+    "provider-runtime-patches.js"
   ]);
 }
 
