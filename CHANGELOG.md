@@ -2,6 +2,11 @@
 
 正式安装包见 [GitHub Releases](https://github.com/Kumiko-kmk/Translator-for-Zotero/releases)；下方 `Unreleased` 仅记录尚未发布的内容。
 
+## 🚀 2.1.1 - 2026-09-11
+
+- 🔧 DeepSeek 根据 API Key 实际可用模型动态选择兼容模型，修复固定模型名导致的账户不可用提示。
+- 🧾 千问错误显示保留服务端错误码、详细消息和 request ID，便于定位 HTTP 400 等请求问题。
+
 ## 🚀 2.1.0 - 2026-08-26
 
 ### 🗄️ 持久化翻译缓存
